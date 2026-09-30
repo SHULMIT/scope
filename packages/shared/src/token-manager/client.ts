@@ -3,15 +3,18 @@
 
 import {
   AcquireAccountResponse,
+  AcquireEndpointResponse,
   AcquireKeyResponse,
   AccountType,
+  EndpointCapability,
   KEY_CAPABILITY_ENV_VARS,
   KeyCapability,
   KeyType,
+  trimTrailingSlashes,
 } from "./types.js";
 
 /**
- * Client for acquiring keys from the Token Manager service.
+ * Client for acquiring keys, endpoint credentials, and accounts from the Token Manager service.
  *
  * Workers use this to get a key before each coding session.
  * If the corresponding env var is set (e.g. GITHUB_TOKEN for 'copilot-sdk'),
@@ -137,6 +140,62 @@ export class TokenManagerClient {
     }
 
     return result;
+  }
+
+  /**
+   * Acquire structured endpoint credentials. A local override requires both
+   * the endpoint and API key; a lone env var must not hide a stored credential.
+   */
+  async acquireEndpoint(capability: EndpointCapability): Promise<AcquireEndpointResponse> {
+    if (capability === "azure-ai-inference") {
+      const endpoint = process.env.AZURE_AI_INFERENCE_ENDPOINT?.trim();
+      const apiKey = process.env.AZURE_AI_INFERENCE_API_KEY?.trim();
+      const deployment = process.env.LLM_MODEL?.trim();
+      if (endpoint && apiKey) {
+        return {
+          endpoint: trimTrailingSlashes(endpoint),
+          apiKey,
+          ...(deployment ? { deployment } : {}),
+        };
+      }
+    }
+
+    if (!this.baseUrl) {
+      throw new Error(
+        `No endpoint available for capability '${capability}': ` +
+          "env vars are not set and TOKEN_MANAGER_URL is not configured"
+      );
+    }
+
+    const response = await fetch(`${this.baseUrl}/api/v1/endpoints/acquire`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ capability }),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => "unknown error");
+      throw new Error(
+        `Endpoint acquisition failed for capability '${capability}' (HTTP ${response.status}): ${errorBody}`
+      );
+    }
+
+    const result: unknown = await response.json();
+    if (
+      !result || typeof result !== "object" ||
+      !("endpoint" in result) || typeof result.endpoint !== "string" || !result.endpoint.trim() ||
+      !("apiKey" in result) || typeof result.apiKey !== "string" || !result.apiKey.trim() ||
+      ("deployment" in result && result.deployment !== undefined && typeof result.deployment !== "string")
+    ) {
+      throw new Error(`Invalid endpoint response for capability '${capability}': missing or invalid credentials`);
+    }
+
+    return {
+      endpoint: result.endpoint,
+      apiKey: result.apiKey,
+      ...("deployment" in result && typeof result.deployment === "string" ? { deployment: result.deployment } : {}),
+    };
   }
 
   /**

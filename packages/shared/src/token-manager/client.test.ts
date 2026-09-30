@@ -200,4 +200,80 @@ describe("TokenManagerClient", () => {
       );
     });
   });
+
+  describe("acquireEndpoint", () => {
+    beforeEach(() => {
+      delete process.env.TOKEN_MANAGER_URL;
+      delete process.env.AZURE_AI_INFERENCE_ENDPOINT;
+      delete process.env.AZURE_AI_INFERENCE_API_KEY;
+      delete process.env.LLM_MODEL;
+    });
+
+    it("returns the full env credential without an HTTP call", async () => {
+      process.env.AZURE_AI_INFERENCE_ENDPOINT = "https://foundry.example/models";
+      process.env.AZURE_AI_INFERENCE_API_KEY = "env-key";
+      process.env.LLM_MODEL = "env-model";
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+      expect(await new TokenManagerClient().acquireEndpoint("azure-ai-inference")).toEqual({
+        endpoint: "https://foundry.example/models",
+        apiKey: "env-key",
+        deployment: "env-model",
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it.each(["AZURE_AI_INFERENCE_API_KEY", "AZURE_AI_INFERENCE_ENDPOINT"])(
+      "acquires from the service when only %s is configured",
+      async (name) => {
+        process.env[name] = "unpaired-value";
+        const credential = { endpoint: "https://foundry.example/models", apiKey: "stored-key", deployment: "stored-model" };
+        const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(credential));
+
+        const result = await new TokenManagerClient("http://token-manager:80/").acquireEndpoint("azure-ai-inference");
+
+        expect(result).toEqual(credential);
+        expect(fetchSpy).toHaveBeenCalledWith("http://token-manager:80/api/v1/endpoints/acquire", expect.objectContaining({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ capability: "azure-ai-inference" }),
+          signal: expect.any(AbortSignal),
+        }));
+      },
+    );
+
+    it("accepts a credential without a deployment", async () => {
+      const credential = { endpoint: "https://foundry.example/models", apiKey: "stored-key" };
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(credential));
+
+      expect(await new TokenManagerClient("http://token-manager:80").acquireEndpoint("azure-ai-inference")).toEqual(credential);
+    });
+
+    it.each([404, 500])("reports acquisition HTTP %i errors", async (status) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ error: "unavailable" }, { status }));
+
+      await expect(new TokenManagerClient("http://token-manager:80").acquireEndpoint("azure-ai-inference"))
+        .rejects.toThrow(new RegExp(`Endpoint acquisition failed.*azure-ai-inference.*${status}`));
+    });
+
+    it.each([
+      null,
+      {},
+      { endpoint: "https://foundry.example/models" },
+      { endpoint: 42, apiKey: "key" },
+      { endpoint: " ", apiKey: "key" },
+      { endpoint: "https://foundry.example/models", apiKey: "" },
+      { endpoint: "https://foundry.example/models", apiKey: "key", deployment: 42 },
+    ])("rejects malformed endpoint responses: %j", async (body) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(body));
+
+      await expect(new TokenManagerClient("http://token-manager:80").acquireEndpoint("azure-ai-inference"))
+        .rejects.toThrow(/Invalid endpoint response.*azure-ai-inference/);
+    });
+
+    it("reports missing endpoint configuration", async () => {
+      await expect(new TokenManagerClient().acquireEndpoint("azure-ai-inference"))
+        .rejects.toThrow(/No endpoint available.*azure-ai-inference.*TOKEN_MANAGER_URL/);
+    });
+  });
 });

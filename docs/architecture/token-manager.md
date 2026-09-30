@@ -165,6 +165,41 @@ stateDiagram-v2
 
 The acquire endpoint uses round-robin selection among valid, enabled keys that provide the requested capability.
 
+### Structured Endpoint Acquisition
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/endpoints/acquire` | Acquire structured endpoint credentials for `{ "capability": "azure-ai-inference" }` |
+
+Endpoint acquisition is an internal service API, like `/keys/acquire`; it is
+not proxied through the public API. `EndpointCapability` currently supports
+`azure-ai-inference`, mapped to the `azure-ai-foundry` `EndpointType`.
+The response contains `endpoint`, `apiKey`, and optional `deployment`.
+
+Endpoint credentials remain registered and managed through `/keys`. They use
+the existing `tokens` metadata collection, one JSON-encoded Key Vault secret
+per key, the Foundry validator, and its scheduled revalidation. No storage
+migration or duplicate endpoint collection is required. Existing secrets keep
+their optional `model` field, which the service exposes as `deployment`.
+The raw `/keys/acquire` API remains compatible with existing callers.
+Deploy the updated Token Manager before consumers that use `acquireEndpoint`;
+older service versions do not provide `/endpoints/acquire`.
+
+The endpoint route round-robins among valid, enabled, non-deleted keys of the
+mapped endpoint type that provide the requested capability. It parses the
+selected secret before returning it and updates `acquireCount` and
+`lastAcquiredAt` after successfully reading the credential. Unsupported
+capabilities return 400; no eligible credential returns 404; a malformed
+stored secret or secret-store failure returns 500 without exposing the raw
+secret.
+
+`TokenManagerClient.acquireEndpoint("azure-ai-inference")` returns the typed
+credential directly. For local development it first checks the complete
+`AZURE_AI_INFERENCE_ENDPOINT` + `AZURE_AI_INFERENCE_API_KEY` pair, with optional
+`LLM_MODEL` exposed as `deployment`. An incomplete pair does not bypass the
+Token Manager. Otherwise it calls `/endpoints/acquire` and checks the response
+shape, so consumers do not parse stored JSON themselves.
+
 ## Usage Tracking
 
 Each key tracks:
@@ -255,12 +290,12 @@ first source that succeeds:
    `AZURE_AI_INFERENCE_ENDPOINT` + `AZURE_AI_INFERENCE_API_KEY`.
    Endpoint URLs missing the `/models` suffix are auto-corrected with a
    warning.
-2. **Azure AI Foundry via the Token Manager** — fetched directly via
-   `POST {TOKEN_MANAGER_URL}/api/v1/keys/acquire {capability:
-   "azure-ai-inference"}` so the helper receives the full JSON blob
-   (endpoint + key + model), not just the API key. The capability
-   `azure-ai-inference` is derived from any registered `azure-ai-foundry`
-   key.
+2. **Azure AI Foundry via the Token Manager** —
+   `TokenManagerClient.acquireEndpoint("azure-ai-inference")` calls
+   `POST {TOKEN_MANAGER_URL}/api/v1/endpoints/acquire` and returns a typed
+   endpoint + API key + optional deployment. The helper uses `deployment`
+   as its model override. The capability `azure-ai-inference` is derived
+   from any registered `azure-ai-foundry` key.
 3. **GitHub Models** — `GITHUB_MODELS_API_KEY` env var, then
    `TokenManagerClient.acquireToken("github-models")`, then `GITHUB_TOKEN`.
 

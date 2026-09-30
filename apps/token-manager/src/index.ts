@@ -9,6 +9,7 @@ import { KeyDocument, AccountDocument, McpSecretDocument, McpServerDocument } fr
 import { createSecretStore, SecretStore } from "./keyvault-store.js";
 import { createKeyRouter } from "./routes.js";
 import { createAccountRouter } from "./account-routes.js";
+import { createEndpointRouter } from "./endpoint-routes.js";
 import { createMcpSecretRouter } from "./mcp-secret-routes.js";
 import { startTokenScheduler } from "./token-scheduler.js";
 import { validateToken } from "./token-validators.js";
@@ -75,6 +76,9 @@ async function initializeClients(): Promise<void> {
   // Mount key routes
   const router = createKeyRouter(keysCollection, secretStore);
   app.use(router);
+
+  // Endpoint credentials share the existing key store and validation lifecycle.
+  app.use(createEndpointRouter(keysCollection, secretStore));
 
   // Mount account routes
   const accountRouter = createAccountRouter(accountsCollection, secretStore);

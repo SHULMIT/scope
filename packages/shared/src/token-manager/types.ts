@@ -116,6 +116,26 @@ export interface AcquireKeyRequest {
   keyType?: KeyType;
 }
 
+// Endpoints use the existing key storage and validation lifecycle, but return
+// structured credentials to callers rather than JSON-encoded secret values.
+export type EndpointType = Extract<KeyType, "azure-ai-foundry">;
+export type EndpointCapability = Extract<KeyCapability, "azure-ai-inference">;
+
+export const ENDPOINT_CAPABILITY_TYPES: Record<EndpointCapability, EndpointType> = {
+  "azure-ai-inference": "azure-ai-foundry",
+};
+
+export interface AcquireEndpointRequest {
+  capability: EndpointCapability;
+}
+
+/** Response from the internal POST /api/v1/endpoints/acquire endpoint. */
+export interface AcquireEndpointResponse {
+  endpoint: string;
+  apiKey: string;
+  deployment?: string;
+}
+
 /**
  * Maps each KeyCapability to the environment variable that workers check
  * for a local fallback (e.g., Docker Compose with env vars).
