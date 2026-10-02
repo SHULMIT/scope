@@ -89,7 +89,7 @@ describe("createProxyClient (gateway backend)", () => {
 
 describe("gateway startRecording plugin assembly", () => {
   let originalEnv: NodeJS.ProcessEnv;
-  let startSessionSpy: ReturnType<typeof vi.fn>;
+  let startSessionSpy: ReturnType<typeof vi.fn<typeof fetch>>;
 
   beforeEach(() => {
     originalEnv = { ...process.env };
@@ -97,12 +97,10 @@ describe("gateway startRecording plugin assembly", () => {
     delete process.env.DEV_PROXY_API_URL;
     delete process.env.TOKEN_MANAGER_URL;
     delete process.env.GATEWAY_TOKEN_PLUGIN_ENABLED;
-    delete process.env.CAPI_HMAC_SIGNING_KEY;
     delete process.env.GATEWAY_CAPI_HMAC_ENABLED;
-    delete process.env.CAPI_HMAC_MACHINE_ID;
 
     // Mock fetch to intercept startSession calls
-    startSessionSpy = vi.fn().mockResolvedValue(
+    startSessionSpy = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(JSON.stringify({ id: "test-session-id" }), {
         status: 201,
         headers: { "Content-Type": "application/json" },
@@ -117,40 +115,36 @@ describe("gateway startRecording plugin assembly", () => {
   });
 
   function getPluginsFromCall(): Record<string, unknown> {
-    const body = JSON.parse(startSessionSpy.mock.calls[0][1].body);
+    const body = JSON.parse(startSessionSpy.mock.calls[0][1]?.body as string);
     return body.plugins;
   }
 
-  it("does not include capi_hmac when CAPI_HMAC_SIGNING_KEY is not set", async () => {
+  it("does not include capi_hmac by default", async () => {
     const client = createProxyClient();
     await client.startRecording();
     const plugins = getPluginsFromCall();
     expect(plugins.capi_hmac).toBeUndefined();
   });
 
-  it("includes capi_hmac when CAPI_HMAC_SIGNING_KEY is set", async () => {
-    process.env.CAPI_HMAC_SIGNING_KEY = "dGVzdC1rZXk=";
+  it("opts the session in when GATEWAY_CAPI_HMAC_ENABLED=true", async () => {
+    process.env.GATEWAY_CAPI_HMAC_ENABLED = "true";
     const client = createProxyClient();
     await client.startRecording();
     const plugins = getPluginsFromCall();
-    expect(plugins.capi_hmac).toEqual({ signingKey: "dGVzdC1rZXk=" });
+    expect(plugins.capi_hmac).toEqual({ enabled: true });
   });
 
-  it("includes machineId when CAPI_HMAC_MACHINE_ID is set", async () => {
-    process.env.CAPI_HMAC_SIGNING_KEY = "dGVzdC1rZXk=";
-    process.env.CAPI_HMAC_MACHINE_ID = "my-machine";
+  it("never sends HMAC credentials in session settings", async () => {
+    process.env.GATEWAY_CAPI_HMAC_ENABLED = "true";
+    process.env.CAPI_HMAC_SECRET = "super-secret";
     const client = createProxyClient();
     await client.startRecording();
-    const plugins = getPluginsFromCall();
-    expect(plugins.capi_hmac).toEqual({
-      signingKey: "dGVzdC1rZXk=",
-      machineId: "my-machine",
-    });
+    const body = startSessionSpy.mock.calls[0][1]?.body as string;
+    expect(body).not.toContain("super-secret");
   });
 
-  it("disables capi_hmac when GATEWAY_CAPI_HMAC_ENABLED=false", async () => {
-    process.env.CAPI_HMAC_SIGNING_KEY = "dGVzdC1rZXk=";
-    process.env.GATEWAY_CAPI_HMAC_ENABLED = "false";
+  it.each(["false", "1", ""])("does not opt in when GATEWAY_CAPI_HMAC_ENABLED=%j", async (value) => {
+    process.env.GATEWAY_CAPI_HMAC_ENABLED = value;
     const client = createProxyClient();
     await client.startRecording();
     const plugins = getPluginsFromCall();

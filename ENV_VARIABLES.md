@@ -519,23 +519,29 @@ own token lifecycle: both Copilot ACP workers set `false` because the Copilot CL
 token minting/refresh itself (enabling the plugin caused upstream 502s — #1058). The VS Code
 Electron worker leaves it enabled.
 
-### CAPI_HMAC_MACHINE_ID
-**Default:** `"scope-gateway"`
-**Type:** string
-
-Default machine identifier used in CAPI HMAC signature payloads when the session's `capi_hmac.machineId` field is not provided. Only relevant when the `capi_hmac` gateway plugin is activated for a session.
-
-### CAPI_HMAC_SIGNING_KEY
-**Default:** _(none)_
-**Type:** string (base64-encoded)
-
-Base64-encoded HMAC-SHA256 signing key for CAPI request signatures. When set (and `GATEWAY_CAPI_HMAC_ENABLED` is not `"false"`), the worker passes this key to the gateway's `capi_hmac` plugin at session creation. In Kubernetes, injected from Azure Key Vault via External Secrets Operator.
-
 ### GATEWAY_CAPI_HMAC_ENABLED
-**Default:** `true` (enabled when `CAPI_HMAC_SIGNING_KEY` is present)
+**Default:** `false`
 **Type:** boolean (`true` | `false`)
 
-Kill switch for the CAPI HMAC signing plugin on the worker side. Set to `"false"` to disable HMAC signing without removing the signing key from the environment.
+Worker-side opt-in for CAPI integration (HMAC) auth. Only relevant when `PROXY_BACKEND=gateway`. When `true`, the worker creates its gateway session with `capi_hmac: { enabled: true }`. The gateway then replaces the agent's `Authorization` header with `Request-HMAC` and `Copilot-Integration-Id` on Copilot API requests. Leave this unset to use the agent's regular GitHub token, which is the default and what community deployments use. The gateway also needs `CAPI_HMAC_SECRET` and `CAPI_INTEGRATION_ID` set; otherwise opting in has no effect.
+
+### CAPI_HMAC_SECRET (gateway)
+**Default:** _(none, which disables the plugin)_
+**Type:** string (secret)
+
+The CAPI integration's HMAC secret, issued by the Copilot API team when an integration is onboarded. It is used as raw bytes (whitespace-trimmed). Set it only on the **gateway**; workers never see it. In Kubernetes, inject it from Key Vault via External Secrets. See [docs/architecture/ai-gateway.md](docs/architecture/ai-gateway.md#capi-hmac-signing-plugin).
+
+### CAPI_INTEGRATION_ID (gateway)
+**Default:** _(none, which disables the plugin)_
+**Type:** string
+
+The `Copilot-Integration-Id` registered for the CAPI integration that `CAPI_HMAC_SECRET` belongs to. It has no default because integration IDs are deployment-specific.
+
+### CAPI_HMAC_TARGET_HOSTS (gateway)
+**Default:** `api.githubcopilot.com,api.enterprise.githubcopilot.com,copilot-proxy.githubusercontent.com`
+**Type:** comma-separated hostnames
+
+Hosts whose requests are rewritten by the `capi_hmac` plugin for opted-in sessions.
 
 ### DEV_PROXY_ENABLED
 **Default:** `false`

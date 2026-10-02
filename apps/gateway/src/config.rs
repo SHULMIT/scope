@@ -50,11 +50,6 @@ pub struct Cli {
     pub additional_ca_certs: Vec<PathBuf>,
 }
 
-/// Gateway-level CAPI HMAC plugin settings (not overridable per session).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct CapiHmacPluginConfig {}
-
 /// Gateway-level HAR plugin settings (not overridable per session).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,8 +80,6 @@ impl Default for HarPluginConfig {
 pub struct PluginsConfig {
     #[serde(default)]
     pub har: HarPluginConfig,
-    #[serde(default)]
-    pub capi_hmac: CapiHmacPluginConfig,
 }
 
 /// Azure Blob Storage config for HAR streaming (optional).

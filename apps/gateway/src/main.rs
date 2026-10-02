@@ -204,11 +204,9 @@ async fn main() -> anyhow::Result<()> {
         let plugin: Arc<dyn gateway::plugin::ProxyPlugin> = Arc::new(HarPlugin::new(har_dir));
         (plugin, None)
     };
-    let capi_hmac_plugin: Arc<dyn gateway::plugin::ProxyPlugin> = Arc::new(CapiHmacPlugin::new());
-    let registry = Arc::new(PluginRegistry::new(vec![
-        har_plugin,
-        capi_hmac_plugin,
-    ]));
+    let capi_hmac_plugin: Arc<dyn gateway::plugin::ProxyPlugin> =
+        Arc::new(CapiHmacPlugin::from_env());
+    let registry = Arc::new(PluginRegistry::new(vec![har_plugin, capi_hmac_plugin]));
 
     // Session manager — wire Redis store when a client is available.
     let session_manager = match redis_client {

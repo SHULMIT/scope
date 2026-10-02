@@ -3,20 +3,31 @@
 
 //! CAPI HMAC request-signing plugin.
 //!
-//! Intercepts outbound requests to Copilot API (CAPI) hosts and attaches an
-//! HMAC-SHA256 signature header. This proves request authenticity to CAPI
-//! endpoints that enforce signature validation.
+//! Lets the gateway authenticate to the Copilot API (CAPI) as a registered
+//! integration using CAPI's service-to-service HMAC scheme instead of the
+//! agent's per-user GitHub/Copilot token.
 //!
-//! The plugin only activates for sessions that provide `capi_hmac` settings
-//! at session start time. Sessions without this config are completely unaffected.
+//! For every request to a CAPI host in an opted-in session, the plugin:
+//! - removes `Authorization` and any client-supplied `Request-HMAC`
+//! - sets `Copilot-Integration-Id: <CAPI_INTEGRATION_ID>`
+//! - sets `Request-HMAC: <unix_ts>.<hex(HMAC-SHA256(secret, unix_ts))>`
+//! - removes `Copilot-Session-Token`, except on `/models/session[/intent]`
+//!
+//! Activation is opt-in at two levels, so default/community deployments that
+//! use a regular GitHub token are unaffected:
+//! 1. Gateway: `CAPI_HMAC_SECRET` and `CAPI_INTEGRATION_ID` must both be set
+//!    in the gateway's environment. Credentials never travel in session
+//!    settings and are therefore never persisted to the session store.
+//! 2. Session: the session must be created with `{"capi_hmac": {"enabled": true}}`.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use base64::Engine;
 use hmac::{Hmac, Mac};
+use http::header::{HeaderName, AUTHORIZATION};
 use http::{HeaderMap, HeaderValue, Uri};
 use parking_lot::RwLock;
 use serde::Deserialize;
@@ -27,27 +38,18 @@ use crate::plugin::{HttpExchange, ProxyPlugin, SessionId};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Per-session configuration provided at session start under the `"capi_hmac"` key.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionConfig {
-    /// Base64-encoded HMAC signing key.
-    signing_key: String,
-    /// Machine identifier included in the signature payload.
-    #[serde(default = "default_machine_id")]
-    machine_id: String,
-    /// Hostnames whose requests should be signed.
-    #[serde(default = "default_target_hosts")]
-    target_hosts: Vec<String>,
-    /// Header name for the HMAC signature (default: `x-copilot-signature`).
-    #[serde(default = "default_signature_header")]
-    signature_header: String,
-}
+const ENV_SECRET: &str = "CAPI_HMAC_SECRET";
+const ENV_INTEGRATION_ID: &str = "CAPI_INTEGRATION_ID";
+const ENV_TARGET_HOSTS: &str = "CAPI_HMAC_TARGET_HOSTS";
 
-fn default_machine_id() -> String {
-    std::env::var("CAPI_HMAC_MACHINE_ID").unwrap_or_else(|_| "scope-gateway".to_string())
-}
+const REQUEST_HMAC: HeaderName = HeaderName::from_static("request-hmac");
+const COPILOT_INTEGRATION_ID: HeaderName = HeaderName::from_static("copilot-integration-id");
+const COPILOT_SESSION_TOKEN: HeaderName = HeaderName::from_static("copilot-session-token");
 
+/// Paths on which CAPI expects `Copilot-Session-Token` alongside the HMAC.
+const SESSION_TOKEN_PATHS: &[&str] = &["/models/session", "/models/session/intent"];
+
+/// Public Copilot API hosts (the same hosts every Copilot client talks to).
 fn default_target_hosts() -> Vec<String> {
     vec![
         "api.githubcopilot.com".to_string(),
@@ -56,71 +58,150 @@ fn default_target_hosts() -> Vec<String> {
     ]
 }
 
-fn default_signature_header() -> String {
-    "x-copilot-signature".to_string()
+/// Gateway-level CAPI integration credentials.
+#[derive(Clone)]
+pub struct CapiHmacCredentials {
+    secret: String,
+    integration_id: String,
+    target_hosts: Vec<String>,
 }
 
-/// Per-session state: config + decoded key.
-struct SessionState {
-    config: SessionConfig,
-    /// Pre-decoded signing key (avoids base64 decode on every request).
-    key_bytes: Vec<u8>,
+impl std::fmt::Debug for CapiHmacCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CapiHmacCredentials")
+            .field("secret", &"[REDACTED]")
+            .field("integration_id", &self.integration_id)
+            .field("target_hosts", &self.target_hosts)
+            .finish()
+    }
+}
+
+impl CapiHmacCredentials {
+    /// Build credentials, returning `None` when the secret or integration ID is
+    /// blank. An empty `target_hosts` list falls back to the public CAPI hosts.
+    pub fn new(secret: &str, integration_id: &str, target_hosts: Vec<String>) -> Option<Self> {
+        let secret = secret.trim();
+        let integration_id = integration_id.trim();
+        if secret.is_empty() || integration_id.is_empty() {
+            return None;
+        }
+        let target_hosts = if target_hosts.is_empty() {
+            default_target_hosts()
+        } else {
+            target_hosts
+        };
+        Some(Self {
+            secret: secret.to_string(),
+            integration_id: integration_id.to_string(),
+            target_hosts,
+        })
+    }
+
+    /// Read credentials from the gateway environment
+    /// (`CAPI_HMAC_SECRET`, `CAPI_INTEGRATION_ID`, optional `CAPI_HMAC_TARGET_HOSTS`).
+    pub fn from_env() -> Option<Self> {
+        let secret = std::env::var(ENV_SECRET).unwrap_or_default();
+        let integration_id = std::env::var(ENV_INTEGRATION_ID).unwrap_or_default();
+        let target_hosts = std::env::var(ENV_TARGET_HOSTS)
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .map(str::to_string)
+            .collect();
+        Self::new(&secret, &integration_id, target_hosts)
+    }
+}
+
+/// Per-session settings provided under the `"capi_hmac"` key.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionSettings {
+    #[serde(default)]
+    enabled: bool,
 }
 
 /// CAPI HMAC request-signing plugin.
 pub struct CapiHmacPlugin {
-    sessions: Arc<RwLock<HashMap<SessionId, SessionState>>>,
-}
-
-impl Default for CapiHmacPlugin {
-    fn default() -> Self {
-        Self::new()
-    }
+    credentials: Option<CapiHmacCredentials>,
+    sessions: Arc<RwLock<HashSet<SessionId>>>,
 }
 
 impl CapiHmacPlugin {
-    pub fn new() -> Self {
+    pub fn new(credentials: Option<CapiHmacCredentials>) -> Self {
         Self {
-            sessions: Arc::new(RwLock::new(HashMap::new())),
+            credentials,
+            sessions: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
-    /// Check if a URI's host matches one of the configured target hosts.
+    /// Construct from the gateway environment and log the activation state.
+    pub fn from_env() -> Self {
+        let credentials = CapiHmacCredentials::from_env();
+        match &credentials {
+            Some(c) => info!(
+                "capi_hmac plugin: available (integration_id={}, targets={:?}); sessions must opt in",
+                c.integration_id, c.target_hosts
+            ),
+            None => info!(
+                "capi_hmac plugin: disabled ({} and {} not both set)",
+                ENV_SECRET, ENV_INTEGRATION_ID
+            ),
+        }
+        Self::new(credentials)
+    }
+
     fn matches_target_host(uri: &Uri, target_hosts: &[String]) -> bool {
-        let host = match uri.host() {
-            Some(h) => h,
-            None => return false,
-        };
-        target_hosts.iter().any(|t| host == t)
+        uri.host()
+            .is_some_and(|host| target_hosts.iter().any(|t| host.eq_ignore_ascii_case(t)))
     }
 
-    /// Build the canonical string and compute the HMAC-SHA256 signature.
-    ///
-    /// Format: `v1:{unix_timestamp}:{base64(hmac_sha256(method\npath\ntimestamp\nmachineId))}`
-    fn compute_signature(
-        key_bytes: &[u8],
-        method: &str,
-        path: &str,
+    /// Compute the `Request-HMAC` header value: `{ts}.{hex(HMAC-SHA256(secret, ts))}`.
+    fn compute_request_hmac(secret: &str, timestamp: u64) -> anyhow::Result<String> {
+        let ts = timestamp.to_string();
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+            .map_err(|e| anyhow::anyhow!("invalid HMAC key: {e}"))?;
+        mac.update(ts.as_bytes());
+        let digest = mac.finalize().into_bytes();
+
+        let mut out = String::with_capacity(ts.len() + 1 + digest.len() * 2);
+        out.push_str(&ts);
+        out.push('.');
+        for byte in digest {
+            // Writing to a String is infallible.
+            let _ = write!(out, "{byte:02x}");
+        }
+        Ok(out)
+    }
+
+    fn now_unix_secs() -> anyhow::Result<u64> {
+        Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+    }
+
+    /// Rewrite headers for a CAPI request. Separated from `on_request` for testing.
+    fn apply(
+        credentials: &CapiHmacCredentials,
+        uri: &Uri,
+        headers: &mut HeaderMap,
         timestamp: u64,
-        machine_id: &str,
-    ) -> anyhow::Result<String> {
-        let canonical = format!("{}\n{}\n{}\n{}", method, path, timestamp, machine_id);
+    ) -> anyhow::Result<()> {
+        let request_hmac = Self::compute_request_hmac(&credentials.secret, timestamp)?;
 
-        let mut mac = HmacSha256::new_from_slice(key_bytes)
-            .map_err(|e| anyhow::anyhow!("invalid HMAC key: {}", e))?;
-        mac.update(canonical.as_bytes());
-        let result = mac.finalize().into_bytes();
-
-        let encoded = base64::engine::general_purpose::STANDARD.encode(result);
-        Ok(format!("v1:{}:{}", timestamp, encoded))
-    }
-
-    /// Return the current Unix timestamp in seconds.
-    fn now_unix_secs() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock is before UNIX epoch")
-            .as_secs()
+        headers.remove(AUTHORIZATION);
+        headers.remove(&REQUEST_HMAC);
+        if !SESSION_TOKEN_PATHS.contains(&uri.path()) {
+            headers.remove(&COPILOT_SESSION_TOKEN);
+        }
+        headers.insert(
+            COPILOT_INTEGRATION_ID,
+            HeaderValue::from_str(&credentials.integration_id)
+                .map_err(|e| anyhow::anyhow!("invalid CAPI integration id: {e}"))?,
+        );
+        let mut hmac_value = HeaderValue::from_str(&request_hmac)
+            .map_err(|e| anyhow::anyhow!("failed to encode Request-HMAC: {e}"))?;
+        hmac_value.set_sensitive(true);
+        headers.insert(REQUEST_HMAC, hmac_value);
+        Ok(())
     }
 }
 
@@ -131,41 +212,25 @@ impl ProxyPlugin for CapiHmacPlugin {
     }
 
     async fn on_session_start(&self, session_id: &SessionId, settings: &serde_json::Value) {
-        // Only activate if settings are a non-empty object
-        if settings.is_null() || settings.as_object().is_none_or(|m| m.is_empty()) {
+        let settings: SessionSettings = match serde_json::from_value(settings.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("capi_hmac plugin: invalid settings for session {session_id}: {e}");
+                return;
+            }
+        };
+        if !settings.enabled {
             return;
         }
-
-        let config: SessionConfig = match serde_json::from_value(settings.clone()) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(
-                    "capi_hmac plugin: invalid settings for session {}: {}",
-                    session_id, e
-                );
-                return;
-            }
-        };
-
-        let key_bytes = match base64::engine::general_purpose::STANDARD.decode(&config.signing_key)
-        {
-            Ok(k) => k,
-            Err(e) => {
-                warn!(
-                    "capi_hmac plugin: invalid base64 signingKey for session {}: {}",
-                    session_id, e
-                );
-                return;
-            }
-        };
-
-        info!(
-            "capi_hmac plugin: activated for session {} (targets={:?}, header={}, machine_id={})",
-            session_id, config.target_hosts, config.signature_header, config.machine_id
-        );
-
-        let mut sessions = self.sessions.write();
-        sessions.insert(session_id.clone(), SessionState { config, key_bytes });
+        if self.credentials.is_none() {
+            warn!(
+                "capi_hmac plugin: session {session_id} requested HMAC signing but the gateway \
+                 has no CAPI credentials ({ENV_SECRET}/{ENV_INTEGRATION_ID}); requests pass through unchanged"
+            );
+            return;
+        }
+        info!("capi_hmac plugin: activated for session {session_id}");
+        self.sessions.write().insert(session_id.clone());
     }
 
     async fn on_request(
@@ -174,47 +239,17 @@ impl ProxyPlugin for CapiHmacPlugin {
         uri: &Uri,
         headers: &mut HeaderMap,
     ) -> anyhow::Result<()> {
-        let (config, key_bytes) = {
-            let sessions = self.sessions.read();
-            let state = match sessions.get(session_id) {
-                Some(s) => s,
-                None => return Ok(()),
-            };
-
-            if !Self::matches_target_host(uri, &state.config.target_hosts) {
-                return Ok(());
-            }
-
-            (state.config.clone(), state.key_bytes.clone())
+        let Some(credentials) = &self.credentials else {
+            return Ok(());
         };
+        if !self.sessions.read().contains(session_id)
+            || !Self::matches_target_host(uri, &credentials.target_hosts)
+        {
+            return Ok(());
+        }
 
-        // The gateway operates as a CONNECT proxy: the outer HTTP method is always
-        // CONNECT regardless of the inner request method (GET, POST, etc.). The CAPI
-        // verifier expects the signature to use the tunnel method, not the inner one.
-        let method = "CONNECT";
-        let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-        let timestamp = Self::now_unix_secs();
-
-        let signature =
-            Self::compute_signature(&key_bytes, method, path, timestamp, &config.machine_id)?;
-
-        let header_name = http::header::HeaderName::from_bytes(config.signature_header.as_bytes())
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "invalid signature header name '{}': {}",
-                    config.signature_header,
-                    e
-                )
-            })?;
-        let header_value = HeaderValue::from_str(&signature)
-            .map_err(|e| anyhow::anyhow!("failed to encode signature as header value: {}", e))?;
-
-        headers.insert(header_name, header_value);
-        debug!(
-            "capi_hmac plugin: signed request to {} for session {}",
-            uri, session_id
-        );
-
+        Self::apply(credentials, uri, headers, Self::now_unix_secs()?)?;
+        debug!("capi_hmac plugin: signed request to {uri} for session {session_id}");
         Ok(())
     }
 
@@ -224,17 +259,15 @@ impl ProxyPlugin for CapiHmacPlugin {
         _exchange: &HttpExchange,
         _iteration: u32,
     ) {
-        // No-op: this plugin doesn't observe exchanges.
     }
 
     async fn on_session_stop(&self, session_id: &SessionId) {
-        debug!("capi_hmac plugin: session stopped for {}", session_id);
+        debug!("capi_hmac plugin: session stopped for {session_id}");
     }
 
     async fn on_session_clear(&self, session_id: &SessionId) {
-        let mut sessions = self.sessions.write();
-        sessions.remove(session_id);
-        debug!("capi_hmac plugin: session cleared for {}", session_id);
+        self.sessions.write().remove(session_id);
+        debug!("capi_hmac plugin: session cleared for {session_id}");
     }
 }
 
@@ -243,243 +276,222 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn make_signing_key() -> String {
-        base64::engine::general_purpose::STANDARD.encode(b"test-secret-key-32-bytes-long!!!")
+    const SECRET: &str = "test-secret";
+    const TS: u64 = 1_720_000_000;
+    // python3 -c "import hmac,hashlib;print(hmac.new(b'test-secret',b'1720000000',hashlib.sha256).hexdigest())"
+    const EXPECTED_HEX: &str = "2fb6b16b6feb3d88fa2398f7e30c97041f0f482097f872ae9e0381c3796557bd";
+
+    fn creds() -> CapiHmacCredentials {
+        CapiHmacCredentials::new(SECRET, "test-integration", vec![]).unwrap()
     }
 
-    fn make_settings() -> serde_json::Value {
-        json!({
-            "signingKey": make_signing_key(),
-            "machineId": "test-machine-001",
-            "targetHosts": ["api.githubcopilot.com"],
-            "signatureHeader": "x-copilot-signature"
-        })
+    fn uri(s: &str) -> Uri {
+        s.parse().unwrap()
     }
 
-    #[tokio::test]
-    async fn no_activation_when_settings_empty() {
-        let plugin = CapiHmacPlugin::new();
-        plugin.on_session_start(&"s1".to_string(), &json!({})).await;
-
-        let sessions = plugin.sessions.read();
-        assert!(sessions.is_empty());
+    fn sid(s: &str) -> SessionId {
+        s.to_string()
     }
 
-    #[tokio::test]
-    async fn no_activation_when_settings_null() {
-        let plugin = CapiHmacPlugin::new();
+    async fn enabled_plugin() -> CapiHmacPlugin {
+        let plugin = CapiHmacPlugin::new(Some(creds()));
         plugin
-            .on_session_start(&"s1".to_string(), &serde_json::Value::Null)
+            .on_session_start(&sid("s1"), &json!({"enabled": true}))
             .await;
-
-        let sessions = plugin.sessions.read();
-        assert!(sessions.is_empty());
-    }
-
-    #[tokio::test]
-    async fn no_activation_when_signing_key_invalid_base64() {
-        let plugin = CapiHmacPlugin::new();
-        let settings = json!({
-            "signingKey": "!!!not-valid-base64!!!",
-            "machineId": "m1"
-        });
-        plugin.on_session_start(&"s1".to_string(), &settings).await;
-
-        let sessions = plugin.sessions.read();
-        assert!(sessions.is_empty());
-    }
-
-    #[tokio::test]
-    async fn activation_with_valid_settings() {
-        let plugin = CapiHmacPlugin::new();
-        let settings = make_settings();
-        plugin.on_session_start(&"s1".to_string(), &settings).await;
-
-        let sessions = plugin.sessions.read();
-        assert!(sessions.contains_key("s1"));
-    }
-
-    #[tokio::test]
-    async fn session_clear_removes_state() {
-        let plugin = CapiHmacPlugin::new();
         plugin
-            .on_session_start(&"s1".to_string(), &make_settings())
-            .await;
-        plugin.on_session_clear(&"s1".to_string()).await;
-
-        let sessions = plugin.sessions.read();
-        assert!(sessions.is_empty());
     }
 
-    #[tokio::test]
-    async fn on_request_noop_for_unconfigured_session() {
-        let plugin = CapiHmacPlugin::new();
-        let uri: Uri = "https://api.githubcopilot.com/v1/chat".parse().unwrap();
-        let mut headers = HeaderMap::new();
-
-        let result = plugin
-            .on_request(&"unknown".to_string(), &uri, &mut headers)
-            .await;
-        assert!(result.is_ok());
-        assert!(headers.get("x-copilot-signature").is_none());
-    }
-
-    #[tokio::test]
-    async fn on_request_noop_for_non_target_host() {
-        let plugin = CapiHmacPlugin::new();
-        plugin
-            .on_session_start(&"s1".to_string(), &make_settings())
-            .await;
-
-        let uri: Uri = "https://example.com/api".parse().unwrap();
-        let mut headers = HeaderMap::new();
-
-        let result = plugin
-            .on_request(&"s1".to_string(), &uri, &mut headers)
-            .await;
-        assert!(result.is_ok());
-        assert!(headers.get("x-copilot-signature").is_none());
-    }
-
-    #[tokio::test]
-    async fn on_request_attaches_signature_for_target_host() {
-        let plugin = CapiHmacPlugin::new();
-        plugin
-            .on_session_start(&"s1".to_string(), &make_settings())
-            .await;
-
-        let uri: Uri = "https://api.githubcopilot.com/v1/chat/completions"
-            .parse()
-            .unwrap();
-        let mut headers = HeaderMap::new();
-
-        let result = plugin
-            .on_request(&"s1".to_string(), &uri, &mut headers)
-            .await;
-        assert!(result.is_ok());
-
-        let sig = headers
-            .get("x-copilot-signature")
-            .unwrap()
-            .to_str()
-            .unwrap();
-        assert!(sig.starts_with("v1:"), "signature should start with 'v1:'");
-        // v1:{timestamp}:{base64}
-        let parts: Vec<&str> = sig.splitn(3, ':').collect();
-        assert_eq!(parts.len(), 3);
-        assert_eq!(parts[0], "v1");
-        // Timestamp should be a valid u64
-        parts[1].parse::<u64>().expect("timestamp should be u64");
-        // Base64 part should decode successfully
-        base64::engine::general_purpose::STANDARD
-            .decode(parts[2])
-            .expect("signature should be valid base64");
-    }
-
-    #[tokio::test]
-    async fn compute_signature_is_deterministic() {
-        let key = b"test-key";
-        let sig1 =
-            CapiHmacPlugin::compute_signature(key, "CONNECT", "/v1/chat", 1000000, "machine-1")
-                .unwrap();
-        let sig2 =
-            CapiHmacPlugin::compute_signature(key, "CONNECT", "/v1/chat", 1000000, "machine-1")
-                .unwrap();
-        assert_eq!(sig1, sig2);
-    }
-
-    #[tokio::test]
-    async fn compute_signature_differs_for_different_inputs() {
-        let key = b"test-key";
-        let sig1 =
-            CapiHmacPlugin::compute_signature(key, "CONNECT", "/v1/chat", 1000000, "machine-1")
-                .unwrap();
-        let sig2 = CapiHmacPlugin::compute_signature(
-            key,
-            "CONNECT",
-            "/v1/completions",
-            1000000,
-            "machine-1",
-        )
-        .unwrap();
-        assert_ne!(sig1, sig2, "different paths should produce different sigs");
-
-        let sig3 =
-            CapiHmacPlugin::compute_signature(key, "CONNECT", "/v1/chat", 1000001, "machine-1")
-                .unwrap();
-        assert_ne!(
-            sig1, sig3,
-            "different timestamps should produce different sigs"
-        );
-
-        let sig4 =
-            CapiHmacPlugin::compute_signature(key, "CONNECT", "/v1/chat", 1000000, "machine-2")
-                .unwrap();
-        assert_ne!(
-            sig1, sig4,
-            "different machine IDs should produce different sigs"
-        );
-    }
-
-    #[tokio::test]
-    async fn compute_signature_known_vector() {
-        // Verify the signature format and that it's a valid HMAC-SHA256
-        let key = b"known-test-key";
-        let sig = CapiHmacPlugin::compute_signature(key, "GET", "/test", 1720000000, "m1").unwrap();
-
-        assert!(sig.starts_with("v1:1720000000:"));
-
-        // Verify by recomputing manually
-        let canonical = "GET\n/test\n1720000000\nm1";
-        let mut mac = HmacSha256::new_from_slice(key).unwrap();
-        mac.update(canonical.as_bytes());
-        let expected =
-            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
-        assert_eq!(sig, format!("v1:1720000000:{}", expected));
-    }
-
-    #[tokio::test]
-    async fn custom_signature_header_is_used() {
-        let plugin = CapiHmacPlugin::new();
-        let settings = json!({
-            "signingKey": make_signing_key(),
-            "machineId": "m1",
-            "targetHosts": ["api.githubcopilot.com"],
-            "signatureHeader": "x-custom-sig"
-        });
-        plugin.on_session_start(&"s1".to_string(), &settings).await;
-
-        let uri: Uri = "https://api.githubcopilot.com/v1/chat".parse().unwrap();
-        let mut headers = HeaderMap::new();
-
-        let result = plugin
-            .on_request(&"s1".to_string(), &uri, &mut headers)
-            .await;
-        assert!(result.is_ok());
-        assert!(headers.get("x-custom-sig").is_some());
-        assert!(headers.get("x-copilot-signature").is_none());
-    }
-
-    #[tokio::test]
-    async fn default_target_hosts_include_all_copilot_hosts() {
-        let hosts = default_target_hosts();
-        assert!(hosts.contains(&"api.githubcopilot.com".to_string()));
-        assert!(hosts.contains(&"api.enterprise.githubcopilot.com".to_string()));
-        assert!(hosts.contains(&"copilot-proxy.githubusercontent.com".to_string()));
+    fn client_headers() -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(AUTHORIZATION, "Bearer user-token".parse().unwrap());
+        h.insert("request-hmac", "client-supplied".parse().unwrap());
+        h.insert("copilot-integration-id", "vscode-chat".parse().unwrap());
+        h.insert("copilot-session-token", "sess".parse().unwrap());
+        h.insert("content-type", "application/json".parse().unwrap());
+        h
     }
 
     #[test]
-    fn matches_target_host_works() {
-        let hosts = vec!["api.githubcopilot.com".to_string()];
+    fn request_hmac_matches_reference_vector() {
+        let value = CapiHmacPlugin::compute_request_hmac(SECRET, TS).unwrap();
+        assert_eq!(value, format!("{TS}.{EXPECTED_HEX}"));
+    }
 
-        let uri: Uri = "https://api.githubcopilot.com/v1/chat".parse().unwrap();
-        assert!(CapiHmacPlugin::matches_target_host(&uri, &hosts));
+    #[test]
+    fn credentials_require_secret_and_integration_id() {
+        assert!(CapiHmacCredentials::new("", "id", vec![]).is_none());
+        assert!(CapiHmacCredentials::new("secret", "  ", vec![]).is_none());
+        let c = CapiHmacCredentials::new(" secret \n", " id ", vec![]).unwrap();
+        assert_eq!(c.secret, "secret");
+        assert_eq!(c.integration_id, "id");
+        assert_eq!(c.target_hosts, default_target_hosts());
+    }
 
-        let uri: Uri = "https://example.com/v1/chat".parse().unwrap();
-        assert!(!CapiHmacPlugin::matches_target_host(&uri, &hosts));
+    #[test]
+    fn credentials_debug_redacts_secret() {
+        let dbg = format!("{:?}", creds());
+        assert!(!dbg.contains(SECRET));
+        assert!(dbg.contains("[REDACTED]"));
+    }
 
-        // URI without host
-        let uri: Uri = "/just-a-path".parse().unwrap();
-        assert!(!CapiHmacPlugin::matches_target_host(&uri, &hosts));
+    #[test]
+    fn custom_target_hosts_override_defaults() {
+        let c = CapiHmacCredentials::new("s", "id", vec!["capi.example.test".into()]).unwrap();
+        assert_eq!(c.target_hosts, vec!["capi.example.test".to_string()]);
+    }
+
+    #[test]
+    fn apply_rewrites_auth_headers() {
+        let mut h = client_headers();
+        CapiHmacPlugin::apply(
+            &creds(),
+            &uri("https://api.githubcopilot.com/chat/completions"),
+            &mut h,
+            TS,
+        )
+        .unwrap();
+
+        assert!(h.get(AUTHORIZATION).is_none());
+        assert!(h.get("copilot-session-token").is_none());
+        assert_eq!(h["copilot-integration-id"], "test-integration");
+        assert_eq!(h["request-hmac"], format!("{TS}.{EXPECTED_HEX}").as_str());
+        assert!(h["request-hmac"].is_sensitive());
+        assert_eq!(h.get_all("request-hmac").iter().count(), 1);
+        assert_eq!(h["content-type"], "application/json");
+    }
+
+    #[test]
+    fn apply_keeps_session_token_on_session_paths() {
+        for path in SESSION_TOKEN_PATHS {
+            let mut h = client_headers();
+            let u = uri(&format!("https://api.githubcopilot.com{path}?x=1"));
+            CapiHmacPlugin::apply(&creds(), &u, &mut h, TS).unwrap();
+            assert_eq!(h["copilot-session-token"], "sess", "path {path}");
+            assert!(h.get(AUTHORIZATION).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn signs_opted_in_session_on_target_host() {
+        let plugin = enabled_plugin().await;
+        let mut h = client_headers();
+        plugin
+            .on_request(
+                &sid("s1"),
+                &uri("https://api.githubcopilot.com/models"),
+                &mut h,
+            )
+            .await
+            .unwrap();
+        assert!(h.get(AUTHORIZATION).is_none());
+        let value = h["request-hmac"].to_str().unwrap();
+        let (ts, hex) = value.split_once('.').unwrap();
+        assert!(ts.parse::<u64>().is_ok());
+        assert_eq!(hex.len(), 64);
+        assert!(hex
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[tokio::test]
+    async fn host_match_is_case_insensitive() {
+        let plugin = enabled_plugin().await;
+        let mut h = client_headers();
+        plugin
+            .on_request(
+                &sid("s1"),
+                &uri("https://API.GitHubCopilot.com/models"),
+                &mut h,
+            )
+            .await
+            .unwrap();
+        assert!(h.get(AUTHORIZATION).is_none());
+    }
+
+    #[tokio::test]
+    async fn non_target_host_untouched() {
+        let plugin = enabled_plugin().await;
+        let mut h = client_headers();
+        let before = h.clone();
+        plugin
+            .on_request(&sid("s1"), &uri("https://api.github.com/user"), &mut h)
+            .await
+            .unwrap();
+        assert_eq!(h, before);
+    }
+
+    #[tokio::test]
+    async fn session_without_opt_in_untouched() {
+        let plugin = CapiHmacPlugin::new(Some(creds()));
+        for settings in [
+            json!({}),
+            json!({"enabled": false}),
+            serde_json::Value::Null,
+        ] {
+            plugin.on_session_start(&sid("s1"), &settings).await;
+        }
+        let mut h = client_headers();
+        let before = h.clone();
+        plugin
+            .on_request(
+                &sid("s1"),
+                &uri("https://api.githubcopilot.com/models"),
+                &mut h,
+            )
+            .await
+            .unwrap();
+        assert_eq!(h, before);
+    }
+
+    #[tokio::test]
+    async fn opt_in_without_gateway_credentials_is_noop() {
+        let plugin = CapiHmacPlugin::new(None);
+        plugin
+            .on_session_start(&sid("s1"), &json!({"enabled": true}))
+            .await;
+        assert!(plugin.sessions.read().is_empty());
+        let mut h = client_headers();
+        let before = h.clone();
+        plugin
+            .on_request(
+                &sid("s1"),
+                &uri("https://api.githubcopilot.com/models"),
+                &mut h,
+            )
+            .await
+            .unwrap();
+        assert_eq!(h, before);
+    }
+
+    #[tokio::test]
+    async fn invalid_settings_do_not_activate() {
+        let plugin = CapiHmacPlugin::new(Some(creds()));
+        plugin
+            .on_session_start(&sid("s1"), &json!({"enabled": "yes"}))
+            .await;
+        assert!(plugin.sessions.read().is_empty());
+    }
+
+    #[tokio::test]
+    async fn other_sessions_unaffected() {
+        let plugin = enabled_plugin().await;
+        let mut h = client_headers();
+        let before = h.clone();
+        plugin
+            .on_request(
+                &sid("s2"),
+                &uri("https://api.githubcopilot.com/models"),
+                &mut h,
+            )
+            .await
+            .unwrap();
+        assert_eq!(h, before);
+    }
+
+    #[tokio::test]
+    async fn session_clear_deactivates() {
+        let plugin = enabled_plugin().await;
+        plugin.on_session_clear(&sid("s1")).await;
+        assert!(plugin.sessions.read().is_empty());
     }
 }

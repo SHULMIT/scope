@@ -350,32 +350,27 @@ Each client is a thin async function that accepts a `reqwest::Client` and a URL,
 
 ### CAPI HMAC Signing Plugin
 
-The CAPI HMAC plugin (`plugins/capi_hmac`) computes and attaches HMAC-SHA256 signatures to outbound Copilot API requests, proving request authenticity to endpoints that enforce signature validation.
+The CAPI HMAC plugin (`plugins/capi_hmac`) lets the gateway authenticate to the Copilot API (CAPI) as a registered **integration**, using CAPI's service-to-service HMAC scheme instead of the agent's per-user GitHub/Copilot token. This is how an integration with dedicated eval capacity calls CAPI.
 
-**How it works:**
+**Activation (opt-in, two levels).** Deployments that use a normal GitHub token, including community users, need nothing and are unaffected.
 
-1. Session starts with `capi_hmac` settings containing a base64-encoded signing key
-2. On each outbound request to a target host, the plugin:
-   - Builds a canonical string: `{method}\n{path}\n{unix_timestamp}\n{machineId}`
-   - Computes HMAC-SHA256 with the signing key
-   - Attaches the signature header: `v1:{timestamp}:{base64(hmac)}`
-3. CAPI validates the signature server-side
+1. **Gateway:** set `CAPI_HMAC_SECRET` and `CAPI_INTEGRATION_ID` in the gateway's environment. If either is missing, the plugin is disabled and logs that at startup. The credentials never travel in session settings, so they are never persisted to the Redis session store.
+2. **Session:** create the session with `"capi_hmac": { "enabled": true }`. Workers do this only when `GATEWAY_CAPI_HMAC_ENABLED=true`. If a session opts in while the gateway has no credentials, a warning is logged and requests pass through unchanged.
 
-**Session settings (passed under `"capi_hmac"` key):**
+**Request rewrite.** For every request from an opted-in session to a target host:
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `signingKey` | string | *(required)* | Base64-encoded HMAC secret key |
-| `machineId` | string | `"scope-gateway"` (env: `CAPI_HMAC_MACHINE_ID`) | Machine identifier for the signature payload |
-| `targetHosts` | string[] | `["api.githubcopilot.com", ...]` | Hosts whose requests should be signed |
-| `signatureHeader` | string | `"x-copilot-signature"` | Header name for the HMAC signature |
+| Header | Action |
+|--------|--------|
+| `Authorization` | Removed (CAPI must not see the agent's user token) |
+| `Request-HMAC` | Set to `{unix_ts}.{hex(HMAC-SHA256(key = secret, msg = unix_ts))}`, freshly computed per request; any client-supplied value is replaced |
+| `Copilot-Integration-Id` | Set to `CAPI_INTEGRATION_ID` |
+| `Copilot-Session-Token` | Removed, except on `/models/session` and `/models/session/intent` |
 
-**Key behaviors:**
+The secret is used as raw UTF-8 bytes (trimmed), with no base64 or hex decoding. The timestamp is in Unix seconds, and the digest is lowercase hex. This matches the reference CAPI proxy used by the VS Code Copilot evaluation harness.
 
-- **Per-session activation**: Only sessions that provide `capi_hmac` settings are signed. Other sessions are unaffected.
-- **Composable**: Works alongside the `copilot_token` plugin — both can modify headers on the same request in sequence (token first, then signature).
-- **Pre-decoded key**: The base64 signing key is decoded once at session start, avoiding per-request decode overhead.
-- **Invalid key rejection**: If the signing key is not valid base64, the session is not activated (logged as a warning).
+**Target hosts.** These default to the public Copilot API hosts that every Copilot client uses: `api.githubcopilot.com`, `api.enterprise.githubcopilot.com`, and `copilot-proxy.githubusercontent.com`. Override them with `CAPI_HMAC_TARGET_HOSTS`, a comma-separated list. Host matching is exact and case-insensitive.
+
+**Redaction.** The HAR plugin redacts `request-hmac` and `copilot-session-token` along with the other credential headers.
 
 **Example session create with HMAC signing:**
 
@@ -385,13 +380,7 @@ POST /api/v1/sessions
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "plugins": {
     "har": { "redactCredentials": true },
-    "copilotToken": {
-    },
-    "capi_hmac": {
-      "signingKey": "base64-encoded-secret-key",
-      "machineId": "worker-001",
-      "targetHosts": ["api.githubcopilot.com"]
-    }
+    "capi_hmac": { "enabled": true }
   }
 }
 ```
