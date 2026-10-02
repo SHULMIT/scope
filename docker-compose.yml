@@ -449,9 +449,6 @@ services:
       REDIS_PORT: "6379"
       REDIS_PASSWORD: ""
       TOKEN_MANAGER_URL: http://token-manager:80
-      # Optional CAPI integration auth (capi_hmac plugin). Empty = disabled.
-      CAPI_HMAC_SECRET: ${CAPI_HMAC_SECRET:-}
-      CAPI_INTEGRATION_ID: ${CAPI_INTEGRATION_ID:-}
     ulimits:
       nofile:
         soft: 65536
@@ -601,7 +598,6 @@ services:
       DEV_PROXY_ENABLED: "${DEV_PROXY_ENABLED:-true}"
       DEV_PROXY_API_URL: http://gateway:18000
       GATEWAY_TOKEN_PLUGIN_ENABLED: "false"
-      GATEWAY_CAPI_HMAC_ENABLED: "${GATEWAY_CAPI_HMAC_ENABLED:-false}"
       MCP_GATEWAY_URL: http://mcp-gateway-copilot:8080
       DOCKER_HOST: unix:///var/run/docker.sock
     volumes:

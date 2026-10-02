@@ -29,7 +29,6 @@ use gateway::config::{Cli, Config};
 use gateway::filters::UrlFilter;
 use gateway::iteration_store::{IterationStore, LocalIterationStore, RedisIterationStore};
 use gateway::plugin::PluginRegistry;
-use gateway::plugins::capi_hmac::plugin::CapiHmacPlugin;
 use gateway::plugins::har::plugin::HarPlugin;
 use gateway::proxy::handler::{handle_client, ProxyState};
 use gateway::session::SessionManager;
@@ -204,9 +203,7 @@ async fn main() -> anyhow::Result<()> {
         let plugin: Arc<dyn gateway::plugin::ProxyPlugin> = Arc::new(HarPlugin::new(har_dir));
         (plugin, None)
     };
-    let capi_hmac_plugin: Arc<dyn gateway::plugin::ProxyPlugin> =
-        Arc::new(CapiHmacPlugin::from_env());
-    let registry = Arc::new(PluginRegistry::new(vec![har_plugin, capi_hmac_plugin]));
+    let registry = Arc::new(PluginRegistry::new(vec![har_plugin]));
 
     // Session manager — wire Redis store when a client is available.
     let session_manager = match redis_client {

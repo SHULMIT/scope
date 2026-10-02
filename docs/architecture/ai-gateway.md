@@ -34,7 +34,6 @@ flowchart TB
         PR["Plugin Registry"]
         HAR["HAR Plugin<br/><i>JSONL → HAR 1.2</i>"]
         CT["CopilotToken Plugin<br/><i>token mint + refresh</i>"]
-        HMAC["CapiHmac Plugin<br/><i>HMAC-SHA256 signing</i>"]
         CA["Certificate Authority<br/><i>dynamic leaf certs</i>"]
     end
 
@@ -55,7 +54,6 @@ flowchart TB
     SM <-->|"session state"| REDIS
     PR --> HAR
     PR --> CT
-    PR --> HMAC
     HAR -->|"append block"| BLOB
     CT -->|"acquire OAuth token"| TM
     PX -->|"TLS intercept<br/>notify plugins"| PR
@@ -66,7 +64,6 @@ flowchart TB
     style PX fill:#f96,stroke:#333
     style HAR fill:#6cf,stroke:#333
     style CT fill:#6cf,stroke:#333
-    style HMAC fill:#6cf,stroke:#333
 ```
 
 ## Session Identity
@@ -348,43 +345,6 @@ clients/
 
 Each client is a thin async function that accepts a `reqwest::Client` and a URL, returns an `anyhow::Result`, and is tested independently with wiremock. The minter (`plugins/copilot_token/minter.rs`) orchestrates the two-step flow and owns the retry logic.
 
-### CAPI HMAC Signing Plugin
-
-The CAPI HMAC plugin (`plugins/capi_hmac`) lets the gateway authenticate to the Copilot API (CAPI) as a registered **integration**, using CAPI's service-to-service HMAC scheme instead of the agent's per-user GitHub/Copilot token. This is how an integration with dedicated eval capacity calls CAPI.
-
-**Activation (opt-in, two levels).** Deployments that use a normal GitHub token, including community users, need nothing and are unaffected.
-
-1. **Gateway:** set `CAPI_HMAC_SECRET` and `CAPI_INTEGRATION_ID` in the gateway's environment. If either is missing, the plugin is disabled and logs that at startup. The credentials never travel in session settings, so they are never persisted to the Redis session store.
-2. **Session:** create the session with `"capi_hmac": { "enabled": true }`. Workers do this only when `GATEWAY_CAPI_HMAC_ENABLED=true`. If a session opts in while the gateway has no credentials, a warning is logged and requests pass through unchanged.
-
-**Request rewrite.** For every request from an opted-in session to a target host:
-
-| Header | Action |
-|--------|--------|
-| `Authorization` | Removed (CAPI must not see the agent's user token) |
-| `Request-HMAC` | Set to `{unix_ts}.{hex(HMAC-SHA256(key = secret, msg = unix_ts))}`, freshly computed per request; any client-supplied value is replaced |
-| `Copilot-Integration-Id` | Set to `CAPI_INTEGRATION_ID` |
-| `Copilot-Session-Token` | Removed, except on `/models/session` and `/models/session/intent` |
-
-The secret is used as raw UTF-8 bytes (trimmed), with no base64 or hex decoding. The timestamp is in Unix seconds, and the digest is lowercase hex. This matches the reference CAPI proxy used by the VS Code Copilot evaluation harness.
-
-**Target hosts.** These default to the public Copilot API hosts that every Copilot client uses: `api.githubcopilot.com`, `api.enterprise.githubcopilot.com`, and `copilot-proxy.githubusercontent.com`. Override them with `CAPI_HMAC_TARGET_HOSTS`, a comma-separated list. Host matching is exact and case-insensitive.
-
-**Redaction.** The HAR plugin redacts `request-hmac` and `copilot-session-token` along with the other credential headers.
-
-**Example session create with HMAC signing:**
-
-```json
-POST /api/v1/sessions
-{
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "plugins": {
-    "har": { "redactCredentials": true },
-    "capi_hmac": { "enabled": true }
-  }
-}
-```
-
 ### Timestamps
 
 All HAR timestamps are in **UTC**. The `startedDateTime` field uses RFC 3339 format with millisecond precision and `Z` suffix (e.g. `2026-04-28T08:25:03.123Z`).
@@ -444,8 +404,6 @@ apps/gateway/
 │   ├── filters/
 │   │   └── url_matcher.rs      # Glob-based URL matching (urlsToWatch)
 │   ├── plugins/
-│   │   ├── capi_hmac/
-│   │   │   └── plugin.rs       # CapiHmacPlugin: HMAC-SHA256 request signing
 │   │   ├── copilot_token/
 │   │   │   ├── plugin.rs       # CopilotTokenPlugin: impl ProxyPlugin
 │   │   │   └── minter.rs       # Orchestrates token acquisition + retry logic
@@ -489,8 +447,6 @@ harBlob:
 |----------|----------|-------------|
 | `BLOB_STORAGE_URL` | When `harBlob` is configured | Full URL of the Azure Storage account (e.g. `https://<account>.blob.core.windows.net`) |
 | `TOKEN_MANAGER_URL` | For Copilot token injection | URL of the Token Manager service |
-| `CAPI_HMAC_SECRET` / `CAPI_INTEGRATION_ID` | For CAPI integration auth (`capi_hmac`) | Integration HMAC secret and `Copilot-Integration-Id`; plugin disabled unless both set |
-| `CAPI_HMAC_TARGET_HOSTS` | No | Comma-separated override of the CAPI hosts rewritten by `capi_hmac` |
 | `AZURE_STORAGE_USE_EMULATOR` | Docker Compose only | Set to `true` to use Azurite instead of Azure |
 | `AZURITE_BLOB_HOST` / `AZURITE_BLOB_PORT` | Docker Compose only | Azurite host and port |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | When Redis session persistence is wanted | Session store connection details |
@@ -546,7 +502,7 @@ env:
 | Phase | Plugin | Status | Purpose |
 |-------|--------|--------|---------|
 | 1.b | Copilot Token Refresh | ✅ Shipped (#724) | Auto-mint and refresh Copilot session tokens |
-| 1.c | CAPI HMAC Signing | ✅ Shipped (#1299) | Sign requests with HMAC for Copilot API |
+| 1.c | CAPI HMAC Signing | Planned | Sign requests with HMAC for Copilot API |
 | 2.b | Rate Limiting | Planned | Budget-aware rate limiting for Claude Code (#659) |
 | 3 | Metrics | Planned | Prometheus `/metrics` — request counts, latency, bytes, error rates |
 
