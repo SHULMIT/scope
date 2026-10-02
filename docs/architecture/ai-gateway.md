@@ -489,6 +489,8 @@ harBlob:
 |----------|----------|-------------|
 | `BLOB_STORAGE_URL` | When `harBlob` is configured | Full URL of the Azure Storage account (e.g. `https://<account>.blob.core.windows.net`) |
 | `TOKEN_MANAGER_URL` | For Copilot token injection | URL of the Token Manager service |
+| `CAPI_HMAC_SECRET` / `CAPI_INTEGRATION_ID` | For CAPI integration auth (`capi_hmac`) | Integration HMAC secret and `Copilot-Integration-Id`; plugin disabled unless both set |
+| `CAPI_HMAC_TARGET_HOSTS` | No | Comma-separated override of the CAPI hosts rewritten by `capi_hmac` |
 | `AZURE_STORAGE_USE_EMULATOR` | Docker Compose only | Set to `true` to use Azurite instead of Azure |
 | `AZURITE_BLOB_HOST` / `AZURITE_BLOB_PORT` | Docker Compose only | Azurite host and port |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | When Redis session persistence is wanted | Session store connection details |
