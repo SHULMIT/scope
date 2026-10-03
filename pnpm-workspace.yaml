@@ -15,6 +15,9 @@ packages:
   - packages/model-scanning
   - packages/db-migrations
   - packages/llm-eval
+  - packages/telemetry
+  - packages/test-utils
+  - evaluations/*
 
 # Runtime language version pinning (for worker Docker images)
 # - python: 3.x (system package)

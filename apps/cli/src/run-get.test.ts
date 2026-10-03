@@ -70,7 +70,6 @@ const fullRun = {
   },
   createdAt: '2025-06-01T10:00:00Z',
   updatedAt: '2025-06-01T10:10:00Z',
-  promptFeatureExtractionId: 'pfe-abc',
 };
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
@@ -173,9 +172,6 @@ describe('run get', () => {
       expect(output).toContain('Iteration 1');
       expect(output).toContain('Iteration 2');
       expect(output).toContain('3/3 criteria passed');
-
-      // Prompt feature extraction
-      expect(output).toContain('pfe-abc');
     });
 
     it('displays minimal run without optional fields', async () => {

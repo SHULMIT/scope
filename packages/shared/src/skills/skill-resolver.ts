@@ -125,6 +125,7 @@ export class SkillResolver {
   /**
    * Resolve a skill from a GitHub repo, returning an existing or newly created SkillRevisionDocument.
    *
+   * @param projectId - Project scope the revision belongs to (per-project copy)
    * @param source - GitHub repo (e.g. "vercel-labs/agent-skills")
    * @param skillName - Skill name (e.g. "vercel-react-best-practices")
    * @param store - SkillRevisionStore for persistence
@@ -132,6 +133,7 @@ export class SkillResolver {
    * @returns The SkillRevisionDocument for this skill at its latest commit
    */
   async resolve(
+    projectId: string,
     source: string,
     skillName: string,
     store: SkillRevisionStore,
@@ -146,9 +148,9 @@ export class SkillResolver {
     // 2. Get the latest commit touching the skill directory
     const commitInfo = await this.getLatestCommit(source, skillPath);
 
-    // 3. Check if we already have this revision
+    // 3. Check if we already have this revision within the project
     const ref = buildSkillRevisionRef(source, skillName, commitInfo.sha);
-    const existing = await store.getByRef(ref);
+    const existing = await store.getByRef(projectId, ref);
     if (existing) {
       return existing;
     }
@@ -182,6 +184,7 @@ export class SkillResolver {
     // 8. Store the revision
     const now = new Date();
     return store.findOrCreate({
+      projectId,
       ref,
       source,
       skillName,

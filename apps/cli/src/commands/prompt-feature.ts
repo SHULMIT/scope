@@ -9,7 +9,8 @@ import { configureHelp } from "../utils/helpFormatter.js";
 import { criterionIcon, dimTimestamp, errorText, successText, label, value, warnBanner } from "../utils/style.js";
 import { formatData, isMachineReadable } from "../utils/formatters.js";
 import type { OutputFormat, DisplayField } from "../utils/types.js";
-import { withOutputOption, getDefaultApiUrl } from "../utils/shared.js";
+import { withOutputOption, withProjectOption, getDefaultApiUrl } from "../utils/shared.js";
+import { requireProjectId } from "../utils/config.js";
 import { apiFetch } from "../utils/api-client.js";
 import { mapYamlCriterion } from "../utils/yaml-mappers.js";
 
@@ -25,22 +26,23 @@ const promptFeature = program
 
 configureHelp(promptFeature);
 
-withOutputOption(
+withProjectOption(withOutputOption(
 promptFeature
   .command("list")
   .description("List all prompt features")
   .option("-q, --query <search>", "Filter by ID or prompt text")
   .option("--type <type>", "Filter by feature type ('select' or 'agents.md')")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
-)
+))
   .action(async (options) => {
     const format = (options.output || 'table') as OutputFormat;
+    const projectId = requireProjectId(options.project);
     try {
       const params = new URLSearchParams();
       if (options.query) params.set("q", options.query);
       if (options.type) params.set("type", options.type);
       const qs = params.toString();
-      const response = await apiFetch(options.url, `/prompt-features${qs ? `?${qs}` : ""}`);
+      const response = await apiFetch(options.url, `/prompt-features${qs ? `?${qs}` : ""}`, { projectId });
 
       if (!response.ok) {
         const error = await response.json();
@@ -81,17 +83,18 @@ promptFeature
     }
   });
 
-withOutputOption(
+withProjectOption(withOutputOption(
 promptFeature
   .command("get")
   .description("Get details of a single prompt feature")
   .requiredOption("-i, --id <id>", "Prompt feature ID")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
-)
+))
   .action(async (options) => {
     const format = (options.output || 'table') as OutputFormat;
     try {
-      const response = await apiFetch(options.url, `/prompt-features/${options.id}`);
+      const projectId = requireProjectId(options.project);
+      const response = await apiFetch(options.url, `/prompt-features/${options.id}`, { projectId });
 
       if (!response.ok) {
         const error = await response.json();
@@ -135,8 +138,10 @@ promptFeature
   .requiredOption("--prompt <prompt>", "Detection prompt for the feature")
   .option("--type <type>", "Feature type ('select' default, or 'agents.md')")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
+  .option("--project <id>", "Project ID for scoped operations (overrides SCOPE_PROJECT and the saved selection)")
   .action(async (options) => {
     try {
+      const projectId = requireProjectId(options.project);
       const body: Record<string, unknown> = {
         id: options.id,
         prompt: options.prompt,
@@ -147,6 +152,7 @@ promptFeature
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        projectId,
       });
 
       if (!response.ok) {
@@ -163,14 +169,17 @@ promptFeature
     }
   });
 
+withProjectOption(
 promptFeature
   .command("update")
   .description("Update an existing prompt feature")
   .requiredOption("-i, --id <id>", "Prompt feature ID")
   .option("--prompt <prompt>", "New detection prompt")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
+)
   .action(async (options) => {
     try {
+      const projectId = requireProjectId(options.project);
       const body: Record<string, unknown> = {};
       if (options.prompt !== undefined) body.prompt = options.prompt;
 
@@ -183,6 +192,7 @@ promptFeature
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        projectId,
       });
 
       if (!response.ok) {
@@ -198,15 +208,19 @@ promptFeature
     }
   });
 
+withProjectOption(
 promptFeature
   .command("delete")
   .description("Delete a prompt feature (soft-delete)")
   .requiredOption("-i, --id <id>", "Prompt feature ID")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
+)
   .action(async (options) => {
     try {
+      const projectId = requireProjectId(options.project);
       const response = await apiFetch(options.url, `/prompt-features/${options.id}`, {
         method: "DELETE",
+        projectId,
       });
 
       if (!response.ok) {
@@ -331,7 +345,7 @@ promptFeature
     }
   });
 
-withOutputOption(
+withProjectOption(withOutputOption(
 promptFeature
   .command("extract")
   .description("Extract prompt features from a task text or scenario file (uses task prompt pipeline)")
@@ -340,9 +354,10 @@ promptFeature
   .option("--model <model>", "LLM model to use for extraction")
   .option("--force", "Force re-extraction even if already extracted")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
-)
+))
   .action(async (options) => {
     const format = (options.output || 'table') as OutputFormat;
+    const projectId = requireProjectId(options.project);
     try {
       let taskText = options.task;
 
@@ -373,6 +388,7 @@ promptFeature
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: taskText }),
+        projectId,
       });
 
       if (!createResponse.ok) {

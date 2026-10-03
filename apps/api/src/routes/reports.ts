@@ -26,6 +26,7 @@ import type {
 } from "../route-context.js";
 import { subscribeClient, unsubscribeClient } from "../utils/sse.js";
 import type { SSEClient } from "../utils/sse.js";
+import { getQueryProjectId } from "../utils/project-scope.js";
 
 export function registerReportsRoutes(ctx: RouteContext): void {
 
@@ -61,9 +62,9 @@ apiRoute(ctx.app, ctx.registry, {
         return;
       }
 
-      // Verify the template exists (if specified)
+      // Verify the template exists (if specified) within the run's project
       if (templateId) {
-        const template = await ctx.reportTemplateCollection.findOne({ id: templateId, deletedAt: { $exists: false } });
+        const template = await ctx.reportTemplateCollection.findOne({ projectId: run.projectId, id: templateId, deletedAt: { $exists: false } });
         if (!template) {
           res.status(404).json({ error: `Report template '${templateId}' not found` });
           return;
@@ -74,6 +75,7 @@ apiRoute(ctx.app, ctx.registry, {
 
       const reportDoc: ReportDocument = {
         _id: reportId,
+        projectId: run.projectId,
         requestId,
         ...(templateId ? { templateId } : {}),
         status: "pending",
@@ -106,14 +108,18 @@ apiRoute(ctx.app, ctx.registry, {
   path: "/api/v1/reports",
   tags: ["Reports"],
   summary: "List reports",
-  query: z.object({ requestId: z.string().optional() }),
+  query: z.object({ requestId: z.string().optional(), projectId: z.string().optional() }),
   response: z.array(ReportResponseSchema),
   handler: async (req, res, next) => {
     try {
       const requestIdFilter = req.query.requestId as string;
       const filter: Record<string, unknown> = {};
       if (requestIdFilter) {
+        // Parent-scoped: the run id already pins the project.
         filter.requestId = requestIdFilter;
+      } else {
+        // Top-level reports list requires an explicit project (400 if absent).
+        filter.projectId = getQueryProjectId(req);
       }
 
       const reports = await ctx.reportCollection
@@ -162,12 +168,14 @@ apiRoute(ctx.app, ctx.registry, {
 
       // Create reports only for runs that exist
       const validIds = requestIds.filter(id => foundIds.has(id));
+      const projectByRequestId = new Map(runs.map(r => [r._id, r.projectId]));
       const created: { reportId: string; requestId: string }[] = [];
 
       for (const requestId of validIds) {
         const reportId = uuidv4();
         const reportDoc: ReportDocument = {
           _id: reportId,
+          projectId: projectByRequestId.get(requestId)!,
           requestId,
           status: "pending",
           createdAt: new Date(),
@@ -520,6 +528,7 @@ apiRoute(ctx.app, ctx.registry, {
           const reportId = uuidv4();
           const reportDoc: ReportDocument = {
             _id: reportId,
+            projectId: run.projectId,
             requestId,
             templateId: template.id,
             status: "pending",
@@ -593,6 +602,7 @@ apiRoute(ctx.app, ctx.registry, {
             const reportId = uuidv4();
             const reportDoc: ReportDocument = {
               _id: reportId,
+              projectId: run.projectId,
               requestId: run._id,
               templateId: template.id,
               status: "pending",

@@ -4,8 +4,11 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import request from "supertest";
 import { app, _injectTestDependencies } from "./index.js";
+import { useTestServer } from "./test-server.js";
 import { _resetRunFacetsCacheForTests } from "./routes/requests/index.js";
 import { createAllMockDependencies, createMockCollection } from "./test-helpers.js";
+
+const TEST_PROJECT_ID = "test-project";
 
 // Stub checkMigrations before it can be imported by index.ts
 vi.mock("db-migrations/check-migrations", () => ({
@@ -32,6 +35,10 @@ vi.mock("./task-prompt-llm.js", () => ({
 }));
 
 describe("API Endpoints", () => {
+  // One persistent server for the whole file (see useTestServer): handing the
+  // Express app straight to supertest would spin up a fresh server per call and
+  // leak sockets, intermittently corrupting later requests.
+  const testServer = useTestServer(app);
   let mocks: ReturnType<typeof createAllMockDependencies>;
 
   beforeAll(() => {
@@ -44,6 +51,21 @@ describe("API Endpoints", () => {
     // Re-inject after clearAllMocks so the mock implementations are fresh
     mocks = createAllMockDependencies();
     _injectTestDependencies(mocks);
+    (mocks.agentCollection.findOne as any).mockResolvedValue({
+      _id: "coder-acp-copilot",
+      name: "Copilot",
+      available: true,
+      supportedModels: [],
+      versions: [
+        {
+          agentVersion: "1.0.0",
+          status: "active",
+          queueName: "queue-coder-acp-copilot",
+          createdAt: new Date(),
+        },
+      ],
+      createdAt: new Date(),
+    });
     // Facets are memoized in a module-level cache; clear it so each test starts cold
     _resetRunFacetsCacheForTests();
   });
@@ -54,7 +76,7 @@ describe("API Endpoints", () => {
 
   describe("GET /health", () => {
     it("returns 200 with status healthy", async () => {
-      const res = await request(app).get("/health");
+      const res = await request(testServer()).get("/health");
       expect(res.status).toBe(200);
       expect(res.body).toHaveProperty("status", "healthy");
       expect(res.body).toHaveProperty("version");
@@ -70,7 +92,7 @@ describe("API Endpoints", () => {
         pending: [],
       });
 
-      const res = await request(app).get("/ready");
+      const res = await request(testServer()).get("/ready");
       expect(res.status).toBe(200);
       expect(res.body.status).toBe("ready");
     });
@@ -83,7 +105,7 @@ describe("API Endpoints", () => {
         pending: ["002"],
       });
 
-      const res = await request(app).get("/ready");
+      const res = await request(testServer()).get("/ready");
       expect(res.status).toBe(503);
       expect(res.body.status).toBe("not-ready");
     });
@@ -91,7 +113,7 @@ describe("API Endpoints", () => {
 
   describe("GET /about", () => {
     it("returns 200 with name and version", async () => {
-      const res = await request(app).get("/about");
+      const res = await request(testServer()).get("/about");
       expect(res.status).toBe(200);
       expect(res.body).toHaveProperty("name");
       expect(res.body).toHaveProperty("version");
@@ -101,11 +123,63 @@ describe("API Endpoints", () => {
 
   describe("GET /api/v1/version", () => {
     it("returns 200 with commit and build info", async () => {
-      const res = await request(app).get("/api/v1/version");
+      const res = await request(testServer()).get("/api/v1/version");
       expect(res.status).toBe(200);
       expect(res.body).toHaveProperty("commit");
       expect(res.body).toHaveProperty("buildTime");
+      expect(res.body).toHaveProperty("strictAgentCapabilities", false);
       expect(res.body).toHaveProperty("environment");
+    });
+  });
+
+  // ===================================================================
+  // Project scoping enforcement (Data Organization: Projects)
+  // A scoped list / root create with no ?projectId= must fail fast with
+  // 400 — there is no default project. Point reads by :id stay unscoped.
+  // ===================================================================
+
+  describe("project scoping enforcement", () => {
+    it("400s a top-level runs list with no projectId", async () => {
+      const res = await request(testServer()).get("/api/v1/requests");
+      expect(res.status).toBe(400);
+    });
+
+    it("400s the runs facets endpoint with no projectId", async () => {
+      const res = await request(testServer()).get("/api/v1/requests/facets");
+      expect(res.status).toBe(400);
+    });
+
+    it("400s a top-level criteria list with no projectId", async () => {
+      const res = await request(testServer()).get("/api/v1/criteria");
+      expect(res.status).toBe(400);
+    });
+
+    it("400s a root criteria create with no projectId", async () => {
+      // findOne → null means this would 201 if scoping were not enforced.
+      (mocks.criteriaCollection.findOne as any).mockResolvedValue(null);
+      const res = await request(testServer())
+        .post("/api/v1/criteria")
+        .send({ id: "unscoped_crit", prompt: "No project?", dependsOn: [] });
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects a by-id point read with no projectId (400 — never a global slug-only resolve)", async () => {
+      const doc = { id: "c1", prompt: "Check it", dependsOn: [], createdAt: new Date() };
+      (mocks.criteriaCollection.findOne as any).mockResolvedValue(doc);
+      const res = await request(testServer()).get("/api/v1/criteria/c1");
+      expect(res.status).toBe(400);
+    });
+
+    it("allows a scoped list once projectId is supplied", async () => {
+      const cursor = {
+        toArray: vi.fn().mockResolvedValue([]),
+        sort: vi.fn().mockReturnThis(),
+        skip: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+      };
+      (mocks.criteriaCollection.find as any).mockReturnValue(cursor);
+      const res = await request(testServer()).get(`/api/v1/criteria?projectId=${TEST_PROJECT_ID}`);
+      expect(res.status).toBe(200);
     });
   });
 
@@ -125,7 +199,7 @@ describe("API Endpoints", () => {
       };
       (mocks.criteriaCollection.find as any).mockReturnValue(cursor);
 
-      const res = await request(app).get("/api/v1/criteria");
+      const res = await request(testServer()).get(`/api/v1/criteria?projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(200);
       expect(Array.isArray(res.body)).toBe(true);
     });
@@ -136,8 +210,8 @@ describe("API Endpoints", () => {
       // findOne returns null (no duplicate)
       (mocks.criteriaCollection.findOne as any).mockResolvedValue(null);
 
-      const res = await request(app)
-        .post("/api/v1/criteria")
+      const res = await request(testServer())
+        .post(`/api/v1/criteria?projectId=${TEST_PROJECT_ID}`)
         .send({ id: "new_crit", prompt: "Does it work?", dependsOn: [] });
 
       expect(res.status).toBe(201);
@@ -151,8 +225,8 @@ describe("API Endpoints", () => {
         createdAt: new Date(),
       });
 
-      const res = await request(app)
-        .post("/api/v1/criteria")
+      const res = await request(testServer())
+        .post(`/api/v1/criteria?projectId=${TEST_PROJECT_ID}`)
         .send({ id: "existing", prompt: "Duplicate", dependsOn: [] });
 
       expect(res.status).toBe(409);
@@ -170,8 +244,8 @@ describe("API Endpoints", () => {
         toArray: () => Promise.resolve(dataset),
       });
 
-      const res = await request(app)
-        .post("/api/v1/criteria")
+      const res = await request(testServer())
+        .post(`/api/v1/criteria?projectId=${TEST_PROJECT_ID}`)
         .send({ id: "b", prompt: "B", dependsOn: ["a"] });
 
       expect(res.status).toBe(400);
@@ -189,8 +263,8 @@ describe("API Endpoints", () => {
         toArray: () => Promise.resolve(dataset),
       });
 
-      const res = await request(app)
-        .post("/api/v1/criteria")
+      const res = await request(testServer())
+        .post(`/api/v1/criteria?projectId=${TEST_PROJECT_ID}`)
         .send({ id: "child", prompt: "C", dependsOn: ["parent"], gates: ["select", "build"] });
 
       expect(res.status).toBe(400);
@@ -204,8 +278,8 @@ describe("API Endpoints", () => {
         sort: () => ({ toArray: () => Promise.resolve([]) }),
       });
 
-      const res = await request(app)
-        .post("/api/v1/criteria/seed")
+      const res = await request(testServer())
+        .post(`/api/v1/criteria/seed?projectId=${TEST_PROJECT_ID}`)
         .send({
           criteria: [
             { id: "a", prompt: "A", dependsOn: ["b"] },
@@ -224,7 +298,7 @@ describe("API Endpoints", () => {
       const depCursor = { toArray: vi.fn().mockResolvedValue([]) };
       (mocks.criteriaCollection.find as any).mockReturnValue(depCursor);
 
-      const res = await request(app).get("/api/v1/criteria/c1");
+      const res = await request(testServer()).get(`/api/v1/criteria/c1?projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(200);
       expect(res.body.id).toBe("c1");
     });
@@ -232,7 +306,7 @@ describe("API Endpoints", () => {
     it("returns 404 when criterion not found", async () => {
       (mocks.criteriaCollection.findOne as any).mockResolvedValue(null);
 
-      const res = await request(app).get("/api/v1/criteria/nonexistent");
+      const res = await request(testServer()).get(`/api/v1/criteria/nonexistent?projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(404);
     });
   });
@@ -244,8 +318,8 @@ describe("API Endpoints", () => {
         .mockResolvedValueOnce(existing)   // existence check
         .mockResolvedValueOnce({ ...existing, prompt: "Updated" }); // after update
 
-      const res = await request(app)
-        .put("/api/v1/criteria/c1")
+      const res = await request(testServer())
+        .put(`/api/v1/criteria/c1?projectId=${TEST_PROJECT_ID}`)
         .send({ prompt: "Updated" });
 
       expect(res.status).toBe(200);
@@ -254,8 +328,8 @@ describe("API Endpoints", () => {
     it("returns 404 when criterion not found", async () => {
       (mocks.criteriaCollection.findOne as any).mockResolvedValue(null);
 
-      const res = await request(app)
-        .put("/api/v1/criteria/missing")
+      const res = await request(testServer())
+        .put(`/api/v1/criteria/missing?projectId=${TEST_PROJECT_ID}`)
         .send({ prompt: "Nope" });
 
       expect(res.status).toBe(404);
@@ -274,7 +348,7 @@ describe("API Endpoints", () => {
         toArray: vi.fn().mockResolvedValue([]),
       });
 
-      const res = await request(app).delete("/api/v1/criteria/c1");
+      const res = await request(testServer()).delete(`/api/v1/criteria/c1?projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(200);
       expect(res.body).toHaveProperty("deleted", true);
     });
@@ -282,7 +356,7 @@ describe("API Endpoints", () => {
     it("returns 404 when criterion not found", async () => {
       (mocks.criteriaCollection.findOne as any).mockResolvedValue(null);
 
-      const res = await request(app).delete("/api/v1/criteria/missing");
+      const res = await request(testServer()).delete(`/api/v1/criteria/missing?projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(404);
     });
 
@@ -297,7 +371,7 @@ describe("API Endpoints", () => {
         toArray: vi.fn().mockResolvedValue([{ id: "child" }]),
       });
 
-      const res = await request(app).delete("/api/v1/criteria/c1");
+      const res = await request(testServer()).delete(`/api/v1/criteria/c1?projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(409);
     });
   });
@@ -313,7 +387,7 @@ describe("API Endpoints", () => {
         toArray: vi.fn().mockResolvedValue(agents),
       });
 
-      const res = await request(app).get("/api/v1/agents");
+      const res = await request(testServer()).get("/api/v1/agents");
       expect(res.status).toBe(200);
       expect(Array.isArray(res.body)).toBe(true);
       expect(res.body[0]).toHaveProperty("id", "coder-acp-copilot");
@@ -324,7 +398,7 @@ describe("API Endpoints", () => {
     it("returns 201 when creating a new agent", async () => {
       (mocks.agentCollection.findOne as any).mockResolvedValue(null);
 
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/agents")
         .send({ _id: "new-agent", name: "New Agent" });
 
@@ -333,7 +407,7 @@ describe("API Endpoints", () => {
     });
 
     it("returns 400 when _id missing", async () => {
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/agents")
         .send({ name: "No ID" });
 
@@ -346,7 +420,7 @@ describe("API Endpoints", () => {
       const doc = { _id: "agent-1", name: "Agent One", supportedModels: [], createdAt: new Date() };
       (mocks.agentCollection.findOne as any).mockResolvedValue(doc);
 
-      const res = await request(app).get("/api/v1/agents/agent-1");
+      const res = await request(testServer()).get("/api/v1/agents/agent-1");
       expect(res.status).toBe(200);
       expect(res.body).toHaveProperty("id", "agent-1");
     });
@@ -354,8 +428,74 @@ describe("API Endpoints", () => {
     it("returns 404 when agent not found", async () => {
       (mocks.agentCollection.findOne as any).mockResolvedValue(null);
 
-      const res = await request(app).get("/api/v1/agents/missing");
+      const res = await request(testServer()).get("/api/v1/agents/missing");
       expect(res.status).toBe(404);
+    });
+  });
+
+  describe("POST /api/v1/agents/:id/versions", () => {
+    const versionPayload = {
+      agentVersion: "synthetic-v1",
+      workerVersion: "synthetic-build",
+      components: {},
+      gitCommit: "abc1234",
+      buildTime: "20260101T000000Z",
+      imageTag: "synthetic-build",
+      queueName: "synthetic-dynamic-queue",
+    };
+
+    it("retries when the versions snapshot changes during registration", async () => {
+      const agent = {
+        _id: "synthetic-worker",
+        versions: [],
+      };
+      (mocks.agentCollection.findOne as any).mockResolvedValue(agent);
+      (mocks.agentCollection.updateOne as any)
+        .mockResolvedValueOnce({ matchedCount: 0, modifiedCount: 0 })
+        .mockResolvedValueOnce({ matchedCount: 1, modifiedCount: 1 });
+
+      const res = await request(app)
+        .post("/api/v1/agents/synthetic-worker/versions")
+        .send(versionPayload);
+
+      expect(res.status).toBe(201);
+      expect((mocks.agentCollection.updateOne as any).mock.calls[1][0]).toMatchObject({
+        _id: "synthetic-worker",
+        versions: agent.versions,
+      });
+    });
+
+    it("converges on an entry inserted by a concurrent registration", async () => {
+      const initialAgent = {
+        _id: "synthetic-worker",
+        versions: [],
+      };
+      const concurrentVersion = {
+        ...versionPayload,
+        status: "active",
+        createdAt: new Date("2026-01-01T00:00:00Z"),
+      };
+      const concurrentlyUpdatedAgent = {
+        ...initialAgent,
+        versions: [concurrentVersion],
+      };
+      (mocks.agentCollection.findOne as any)
+        .mockResolvedValueOnce(initialAgent)
+        .mockResolvedValueOnce(concurrentlyUpdatedAgent);
+      (mocks.agentCollection.updateOne as any)
+        .mockResolvedValueOnce({ matchedCount: 0, modifiedCount: 0 })
+        .mockResolvedValueOnce({ matchedCount: 1, modifiedCount: 1 });
+
+      const res = await request(app)
+        .post("/api/v1/agents/synthetic-worker/versions")
+        .send(versionPayload);
+
+      expect(res.status).toBe(200);
+      expect(mocks.agentCollection.updateOne).toHaveBeenCalledTimes(2);
+      expect((mocks.agentCollection.updateOne as any).mock.calls[1][0]).toMatchObject({
+        _id: "synthetic-worker",
+        versions: concurrentlyUpdatedAgent.versions,
+      });
     });
   });
 
@@ -368,11 +508,20 @@ describe("API Endpoints", () => {
       (mocks.agentCollection.findOne as any).mockResolvedValue({
         _id: "coder-acp-copilot",
         name: "Copilot",
+        available: true,
         supportedModels: [],
+        versions: [
+          {
+            agentVersion: "1.0.0",
+            status: "active",
+            queueName: "queue-coder-acp-copilot",
+            createdAt: new Date(),
+          },
+        ],
       });
 
-      const res = await request(app)
-        .post("/api/v1/profiles")
+      const res = await request(testServer())
+        .post(`/api/v1/profiles?projectId=${TEST_PROJECT_ID}`)
         .send({
           name: "test profile",
           description: "",
@@ -389,11 +538,20 @@ describe("API Endpoints", () => {
       (mocks.agentCollection.findOne as any).mockResolvedValue({
         _id: "coder-acp-copilot",
         name: "Copilot",
+        available: true,
         supportedModels: ["gpt-5"],
+        versions: [
+          {
+            agentVersion: "1.0.0",
+            status: "active",
+            queueName: "queue-coder-acp-copilot",
+            createdAt: new Date(),
+          },
+        ],
       });
 
-      const res = await request(app)
-        .post("/api/v1/profiles")
+      const res = await request(testServer())
+        .post(`/api/v1/profiles?projectId=${TEST_PROJECT_ID}`)
         .send({
           name: "test profile",
           description: "",
@@ -410,8 +568,8 @@ describe("API Endpoints", () => {
     it("returns 404 when the target agent does not exist", async () => {
       (mocks.agentCollection.findOne as any).mockResolvedValue(null);
 
-      const res = await request(app)
-        .post("/api/v1/profiles")
+      const res = await request(testServer())
+        .post(`/api/v1/profiles?projectId=${TEST_PROJECT_ID}`)
         .send({
           name: "test profile",
           description: "",
@@ -421,7 +579,7 @@ describe("API Endpoints", () => {
         });
 
       expect(res.status).toBe(404);
-      expect(res.body.error).toMatch(/Agent not found/);
+      expect(res.body.error).toMatch(/not registered/);
     });
   });
 
@@ -438,7 +596,7 @@ describe("API Endpoints", () => {
         }),
       });
 
-      const res = await request(app).get("/api/v1/models");
+      const res = await request(testServer()).get("/api/v1/models");
       expect(res.status).toBe(200);
       expect(Array.isArray(res.body)).toBe(true);
     });
@@ -457,7 +615,7 @@ describe("API Endpoints", () => {
         }),
       });
 
-      const res = await request(app).get("/api/v1/insights");
+      const res = await request(testServer()).get(`/api/v1/insights?projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(200);
       expect(Array.isArray(res.body)).toBe(true);
       expect(res.body[0]).toHaveProperty("id", "i1");
@@ -466,8 +624,8 @@ describe("API Endpoints", () => {
 
   describe("POST /api/v1/insights", () => {
     it("returns 201 when creating an insight", async () => {
-      const res = await request(app)
-        .post("/api/v1/insights")
+      const res = await request(testServer())
+        .post(`/api/v1/insights?projectId=${TEST_PROJECT_ID}`)
         .send({ title: "New Insight", description: "Something learned" });
 
       expect(res.status).toBe(201);
@@ -476,8 +634,8 @@ describe("API Endpoints", () => {
     });
 
     it("returns 400 when title missing", async () => {
-      const res = await request(app)
-        .post("/api/v1/insights")
+      const res = await request(testServer())
+        .post(`/api/v1/insights?projectId=${TEST_PROJECT_ID}`)
         .send({ description: "No title" });
 
       expect(res.status).toBe(400);
@@ -489,7 +647,7 @@ describe("API Endpoints", () => {
       const doc = { _id: "i1", title: "Insight", description: "details", createdAt: new Date() };
       (mocks.insightsCollection.findOne as any).mockResolvedValue(doc);
 
-      const res = await request(app).get("/api/v1/insights/i1");
+      const res = await request(testServer()).get("/api/v1/insights/i1");
       expect(res.status).toBe(200);
       expect(res.body).toHaveProperty("id", "i1");
     });
@@ -497,7 +655,7 @@ describe("API Endpoints", () => {
     it("returns 404 when insight not found", async () => {
       (mocks.insightsCollection.findOne as any).mockResolvedValue(null);
 
-      const res = await request(app).get("/api/v1/insights/missing");
+      const res = await request(testServer()).get("/api/v1/insights/missing");
       expect(res.status).toBe(404);
     });
   });
@@ -517,7 +675,7 @@ describe("API Endpoints", () => {
         }),
       });
 
-      const res = await request(app).get("/api/v1/requests");
+      const res = await request(testServer()).get(`/api/v1/requests?projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(200);
       expect(res.body).toHaveProperty("data");
       expect(res.body).toHaveProperty("limit");
@@ -538,7 +696,7 @@ describe("API Endpoints", () => {
         .mockReturnValueOnce({ toArray: vi.fn().mockResolvedValue([]) }) // hasMoreAfter
         .mockReturnValueOnce({ toArray: vi.fn().mockResolvedValue([]) }); // hasMoreBefore
 
-      const res = await request(app).get("/api/v1/requests?groupBy=task");
+      const res = await request(testServer()).get(`/api/v1/requests?groupBy=task&projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(200);
       expect(res.body).toHaveProperty("data");
       expect(Array.isArray(res.body.data)).toBe(true);
@@ -558,7 +716,7 @@ describe("API Endpoints", () => {
         .mockReturnValueOnce({ toArray: vi.fn().mockResolvedValue([]) })
         .mockReturnValueOnce({ toArray: vi.fn().mockResolvedValue([]) });
 
-      const res = await request(app).get("/api/v1/requests?groupBy=submissionId");
+      const res = await request(testServer()).get(`/api/v1/requests?groupBy=submissionId&projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(200);
       expect(res.body.data[0]).toHaveProperty("key", "sub-1");
     });
@@ -567,7 +725,7 @@ describe("API Endpoints", () => {
       (mocks.collection.aggregate as any)
         .mockReturnValueOnce({ toArray: vi.fn().mockResolvedValue([]) }); // keys (empty)
 
-      await request(app).get("/api/v1/requests?groupBy=task");
+      await request(testServer()).get(`/api/v1/requests?groupBy=task&projectId=${TEST_PROJECT_ID}`);
       expect(mocks.collection.aggregate).toHaveBeenCalled();
       // Phase 1 key pipeline: $match, $group, $sort, $limit
       const pipeline = (mocks.collection.aggregate as any).mock.calls[0][0];
@@ -584,7 +742,7 @@ describe("API Endpoints", () => {
         }),
       });
 
-      await request(app).get("/api/v1/requests");
+      await request(testServer()).get(`/api/v1/requests?projectId=${TEST_PROJECT_ID}`);
       expect(mocks.collection.aggregate).not.toHaveBeenCalled();
     });
 
@@ -597,7 +755,7 @@ describe("API Endpoints", () => {
         }),
       });
 
-      await request(app).get("/api/v1/requests?status=done");
+      await request(testServer()).get(`/api/v1/requests?status=done&projectId=${TEST_PROJECT_ID}`);
       expect(mocks.collection.find).toHaveBeenCalledWith(
         expect.objectContaining({ "run.status": "done" }),
       );
@@ -612,7 +770,7 @@ describe("API Endpoints", () => {
         }),
       });
 
-      await request(app).get("/api/v1/requests?outcome=succeeded");
+      await request(testServer()).get(`/api/v1/requests?outcome=succeeded&projectId=${TEST_PROJECT_ID}`);
       expect(mocks.collection.find).toHaveBeenCalledWith(
         expect.objectContaining({ "run.outcome": "succeeded" }),
       );
@@ -623,7 +781,7 @@ describe("API Endpoints", () => {
         .mockReturnValueOnce({ toArray: vi.fn().mockResolvedValue([]) })
         .mockReturnValueOnce({ toArray: vi.fn().mockResolvedValue([{ count: 0 }]) });
 
-      await request(app).get("/api/v1/requests?groupBy=task&status=done&outcome=failed");
+      await request(testServer()).get(`/api/v1/requests?groupBy=task&status=done&outcome=failed&projectId=${TEST_PROJECT_ID}`);
       const pipeline = (mocks.collection.aggregate as any).mock.calls[0][0];
       expect(pipeline[0]).toEqual(
         expect.objectContaining({
@@ -641,7 +799,7 @@ describe("API Endpoints", () => {
         }),
       });
 
-      await request(app).get("/api/v1/requests?status=processing&outcome=succeeded&worker=coder-acp-copilot");
+      await request(testServer()).get(`/api/v1/requests?status=processing&outcome=succeeded&worker=coder-acp-copilot&projectId=${TEST_PROJECT_ID}`);
       expect(mocks.collection.find).toHaveBeenCalledWith(
         expect.objectContaining({
           "run.status": "processing",
@@ -664,7 +822,7 @@ describe("API Endpoints", () => {
 
     it("turns a multi-value status into an $in clause", async () => {
       mockFindChain();
-      await request(app).get("/api/v1/requests?status=done&status=pending");
+      await request(testServer()).get(`/api/v1/requests?status=done&status=pending&projectId=${TEST_PROJECT_ID}`);
       expect(mocks.collection.find).toHaveBeenCalledWith(
         expect.objectContaining({ "run.status": { $in: ["done", "pending"] } }),
       );
@@ -672,7 +830,7 @@ describe("API Endpoints", () => {
 
     it("accepts comma-separated multi-value selections", async () => {
       mockFindChain();
-      await request(app).get("/api/v1/requests?outcome=succeeded,failed");
+      await request(testServer()).get(`/api/v1/requests?outcome=succeeded,failed&projectId=${TEST_PROJECT_ID}`);
       expect(mocks.collection.find).toHaveBeenCalledWith(
         expect.objectContaining({ "run.outcome": { $in: ["succeeded", "failed"] } }),
       );
@@ -680,7 +838,7 @@ describe("API Endpoints", () => {
 
     it("maps the (Unknown) sentinel to a missing-or-null $and clause", async () => {
       mockFindChain();
-      await request(app).get("/api/v1/requests?outcome=__empty__");
+      await request(testServer()).get(`/api/v1/requests?outcome=__empty__&projectId=${TEST_PROJECT_ID}`);
       const filter = (mocks.collection.find as any).mock.calls.at(-1)[0];
       expect(filter.$and).toEqual(
         expect.arrayContaining([
@@ -691,7 +849,7 @@ describe("API Endpoints", () => {
 
     it("adds a case-insensitive regex $or for free-text search", async () => {
       mockFindChain();
-      await request(app).get("/api/v1/requests?search=gpt-5");
+      await request(testServer()).get(`/api/v1/requests?search=gpt-5&projectId=${TEST_PROJECT_ID}`);
       const filter = (mocks.collection.find as any).mock.calls.at(-1)[0];
       const searchClause = (filter.$and as any[]).find((c) => Array.isArray(c.$or) && c.$or.some((o: any) => o.model));
       expect(searchClause).toBeDefined();
@@ -702,8 +860,8 @@ describe("API Endpoints", () => {
 
     it("filters by model, os, and agentVersion", async () => {
       mockFindChain();
-      await request(app).get(
-        "/api/v1/requests?model=gpt-5&os=linux&agentVersion=copilot-0.0.415",
+      await request(testServer()).get(
+        `/api/v1/requests?model=gpt-5&os=linux&agentVersion=copilot-0.0.415&projectId=${TEST_PROJECT_ID}`,
       );
       expect(mocks.collection.find).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -716,7 +874,7 @@ describe("API Endpoints", () => {
 
     it("coerces a priority filter to a number", async () => {
       mockFindChain();
-      await request(app).get("/api/v1/requests?priority=3");
+      await request(testServer()).get(`/api/v1/requests?priority=3&projectId=${TEST_PROJECT_ID}`);
       expect(mocks.collection.find).toHaveBeenCalledWith(
         expect.objectContaining({ priority: 3 }),
       );
@@ -724,8 +882,8 @@ describe("API Endpoints", () => {
 
     it("applies a createdAt range for createdAfter/createdBefore", async () => {
       mockFindChain();
-      await request(app).get(
-        "/api/v1/requests?createdAfter=2026-01-01T00:00:00Z&createdBefore=2026-12-31T00:00:00Z",
+      await request(testServer()).get(
+        `/api/v1/requests?createdAfter=2026-01-01T00:00:00Z&createdBefore=2026-12-31T00:00:00Z&projectId=${TEST_PROJECT_ID}`,
       );
       const filter = (mocks.collection.find as any).mock.calls.at(-1)[0];
       expect(filter.createdAt.$gte).toBeInstanceOf(Date);
@@ -734,27 +892,27 @@ describe("API Endpoints", () => {
 
     it("rejects an inverted createdAt range with 400", async () => {
       mockFindChain();
-      const res = await request(app).get(
-        "/api/v1/requests?createdAfter=2026-12-31T00:00:00Z&createdBefore=2026-01-01T00:00:00Z",
+      const res = await request(testServer()).get(
+        `/api/v1/requests?createdAfter=2026-12-31T00:00:00Z&createdBefore=2026-01-01T00:00:00Z&projectId=${TEST_PROJECT_ID}`,
       );
       expect(res.status).toBe(400);
     });
 
     it("rejects an invalid createdAfter datetime with 400", async () => {
       mockFindChain();
-      const res = await request(app).get("/api/v1/requests?createdAfter=not-a-date");
+      const res = await request(testServer()).get(`/api/v1/requests?createdAfter=not-a-date&projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(400);
     });
 
     it("sorts by an allowlisted field and direction over { field, _id }", async () => {
       const sortSpy = mockFindChain();
-      await request(app).get("/api/v1/requests?sortBy=priority&sortDir=asc");
+      await request(testServer()).get(`/api/v1/requests?sortBy=priority&sortDir=asc&projectId=${TEST_PROJECT_ID}`);
       expect(sortSpy).toHaveBeenCalledWith({ priority: 1, _id: 1 });
     });
 
     it("defaults to createdAt desc when no sortBy is given", async () => {
       const sortSpy = mockFindChain();
-      await request(app).get("/api/v1/requests");
+      await request(testServer()).get(`/api/v1/requests?projectId=${TEST_PROJECT_ID}`);
       expect(sortSpy).toHaveBeenCalledWith({ createdAt: -1, _id: -1 });
     });
 
@@ -762,7 +920,7 @@ describe("API Endpoints", () => {
       mockFindChain();
       (mocks.collection.countDocuments as any).mockResolvedValue(7);
       (mocks.collection.estimatedDocumentCount as any).mockResolvedValue(99);
-      const res = await request(app).get("/api/v1/requests?status=done");
+      const res = await request(testServer()).get(`/api/v1/requests?status=done&projectId=${TEST_PROJECT_ID}`);
       expect(res.body.estimatedTotal).toBe(7);
       expect(mocks.collection.countDocuments).toHaveBeenCalled();
     });
@@ -771,9 +929,9 @@ describe("API Endpoints", () => {
       mockFindChain();
       (mocks.collection.countDocuments as any).mockResolvedValue(7);
       (mocks.collection.estimatedDocumentCount as any).mockResolvedValue(99);
-      const res = await request(app).get("/api/v1/requests");
-      expect(res.body.estimatedTotal).toBe(99);
-      expect(mocks.collection.countDocuments).not.toHaveBeenCalled();
+      const res = await request(testServer()).get(`/api/v1/requests?projectId=${TEST_PROJECT_ID}`);
+      expect(res.body.estimatedTotal).toBe(7);
+      expect(mocks.collection.countDocuments).toHaveBeenCalled();
     });
 
     it("omits estimatedTotal and skips run-count queries in grouped mode", async () => {
@@ -787,7 +945,7 @@ describe("API Endpoints", () => {
       (mocks.collection.countDocuments as any).mockResolvedValue(7);
       (mocks.collection.estimatedDocumentCount as any).mockResolvedValue(99);
 
-      const res = await request(app).get("/api/v1/requests?groupBy=task");
+      const res = await request(testServer()).get(`/api/v1/requests?groupBy=task&projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(200);
       expect(res.body).not.toHaveProperty("estimatedTotal");
       expect(mocks.collection.countDocuments).not.toHaveBeenCalled();
@@ -804,7 +962,7 @@ describe("API Endpoints", () => {
         ]),
       });
 
-      const res = await request(app).get("/api/v1/requests/facets");
+      const res = await request(testServer()).get(`/api/v1/requests/facets?projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(200);
       // total is derived by summing a single dimension's buckets (8 + 4), not a
       // separate count query.
@@ -831,7 +989,7 @@ describe("API Endpoints", () => {
         toArray: vi.fn().mockResolvedValue([]),
       });
 
-      await request(app).get("/api/v1/requests/facets");
+      await request(testServer()).get(`/api/v1/requests/facets?projectId=${TEST_PROJECT_ID}`);
       // 8 categorical dimensions → 8 parallel aggregations (no $facet).
       expect((mocks.collection.aggregate as any).mock.calls.length).toBe(8);
     });
@@ -841,15 +999,17 @@ describe("API Endpoints", () => {
         toArray: vi.fn().mockResolvedValue([]),
       });
 
-      await request(app).get(
-        "/api/v1/requests/facets?search=foo&status=done&model=gpt-4&createdAfter=2024-01-01T00:00:00Z&turns=3&turnsOp=gte",
+      await request(testServer()).get(
+        `/api/v1/requests/facets?search=foo&status=done&model=gpt-4&createdAfter=2024-01-01T00:00:00Z&turns=3&turnsOp=gte&projectId=${TEST_PROJECT_ID}`,
       );
       // Every aggregation matches only the constant non-deleted predicate; no
       // search regex / date / numeric / categorical clause leaks into $match.
       const calls = (mocks.collection.aggregate as any).mock.calls;
       expect(calls.length).toBe(8);
       for (const [pipeline] of calls) {
-        expect(pipeline[0]).toEqual({ $match: { deletedAt: { $exists: false } } });
+        expect(pipeline[0]).toEqual({
+          $match: { deletedAt: { $exists: false }, projectId: TEST_PROJECT_ID },
+        });
       }
     });
 
@@ -858,8 +1018,8 @@ describe("API Endpoints", () => {
         toArray: vi.fn().mockResolvedValue([{ _id: "x", count: 1 }]),
       });
 
-      const first = await request(app).get("/api/v1/requests/facets");
-      const second = await request(app).get("/api/v1/requests/facets");
+      const first = await request(testServer()).get(`/api/v1/requests/facets?projectId=${TEST_PROJECT_ID}`);
+      const second = await request(testServer()).get(`/api/v1/requests/facets?projectId=${TEST_PROJECT_ID}`);
       expect(first.status).toBe(200);
       expect(second.body).toEqual(first.body);
       // Second call hits the in-memory cache → no additional aggregations.
@@ -872,7 +1032,7 @@ describe("API Endpoints", () => {
       const doc = { _id: "r1", scenario: { task: "t", criteria: [] }, workerType: "coder-acp-copilot", status: "completed" };
       (mocks.collection.findOne as any).mockResolvedValue(doc);
 
-      const res = await request(app).get("/api/v1/requests/r1");
+      const res = await request(testServer()).get("/api/v1/requests/r1");
       expect(res.status).toBe(200);
       expect(res.body).toHaveProperty("id", "r1");
     });
@@ -880,7 +1040,7 @@ describe("API Endpoints", () => {
     it("returns 404 when request not found", async () => {
       (mocks.collection.findOne as any).mockResolvedValue(null);
 
-      const res = await request(app).get("/api/v1/requests/missing");
+      const res = await request(testServer()).get("/api/v1/requests/missing");
       expect(res.status).toBe(404);
     });
   });
@@ -889,7 +1049,7 @@ describe("API Endpoints", () => {
     it("returns 200 when request is soft-deleted", async () => {
       (mocks.collection.updateOne as any).mockResolvedValue({ matchedCount: 1, modifiedCount: 1 });
 
-      const res = await request(app).delete("/api/v1/requests/r1");
+      const res = await request(testServer()).delete("/api/v1/requests/r1");
       expect(res.status).toBe(200);
       expect(res.body).toHaveProperty("deleted", true);
     });
@@ -898,7 +1058,7 @@ describe("API Endpoints", () => {
       (mocks.collection.updateOne as any).mockResolvedValue({ matchedCount: 0, modifiedCount: 0 });
       (mocks.collection.findOne as any).mockResolvedValue(null);
 
-      const res = await request(app).delete("/api/v1/requests/missing");
+      const res = await request(testServer()).delete("/api/v1/requests/missing");
       expect(res.status).toBe(404);
     });
 
@@ -906,7 +1066,7 @@ describe("API Endpoints", () => {
       (mocks.collection.updateOne as any).mockResolvedValue({ matchedCount: 0, modifiedCount: 0 });
       (mocks.collection.findOne as any).mockResolvedValue({ _id: "r1", deletedAt: new Date() });
 
-      const res = await request(app).delete("/api/v1/requests/r1");
+      const res = await request(testServer()).delete("/api/v1/requests/r1");
       expect(res.status).toBe(410);
     });
   });
@@ -928,7 +1088,7 @@ describe("API Endpoints", () => {
         toArray: vi.fn().mockResolvedValue([]),
       });
 
-      const res = await request(app).get("/api/v1/reports");
+      const res = await request(testServer()).get(`/api/v1/reports?projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(200);
       expect(Array.isArray(res.body)).toBe(true);
     });
@@ -942,7 +1102,7 @@ describe("API Endpoints", () => {
         status: "completed",
       });
 
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/reports")
         .send({ requestId: "r1" });
 
@@ -952,7 +1112,7 @@ describe("API Endpoints", () => {
     });
 
     it("returns 400 when requestId missing", async () => {
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/reports")
         .send({});
 
@@ -962,7 +1122,7 @@ describe("API Endpoints", () => {
     it("returns 404 when referenced run not found", async () => {
       (mocks.collection.findOne as any).mockResolvedValue(null);
 
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/reports")
         .send({ requestId: "no-such-run" });
 
@@ -981,9 +1141,75 @@ describe("API Endpoints", () => {
         toArray: vi.fn().mockResolvedValue(templates),
       });
 
-      const res = await request(app).get("/api/v1/report-templates");
+      const res = await request(testServer()).get(`/api/v1/report-templates?projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(200);
       expect(Array.isArray(res.body)).toBe(true);
+    });
+  });
+
+  // §16: report-templates is project-scoped; by-id GET/PUT/DELETE must never
+  // resolve a business `id` globally — they require ?projectId= and scope the
+  // Mongo filter to { projectId, id } (never a global slug-only { id }).
+  describe("Report templates by-id scoping (§16)", () => {
+    const TID = "rt-scope";
+    const seededTemplate = {
+      projectId: TEST_PROJECT_ID,
+      id: TID,
+      name: "Seed",
+      userPrompt: "Analyze",
+      createdAt: new Date(),
+    };
+
+    it("GET /:id without projectId → 400 (no global slug-only resolve)", async () => {
+      const res = await request(testServer()).get(`/api/v1/report-templates/${TID}`);
+      expect(res.status).toBe(400);
+      expect(mocks.reportTemplateCollection.findOne).not.toHaveBeenCalled();
+    });
+
+    it("GET /:id?projectId scopes the read to { projectId, id }", async () => {
+      (mocks.reportTemplateCollection.findOne as any).mockResolvedValue(seededTemplate);
+      const res = await request(testServer()).get(`/api/v1/report-templates/${TID}?projectId=${TEST_PROJECT_ID}`);
+      expect(res.status).toBe(200);
+      expect(mocks.reportTemplateCollection.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: TEST_PROJECT_ID, id: TID })
+      );
+    });
+
+    it("PUT /:id without projectId → 400 (never a global slug-only update)", async () => {
+      const res = await request(testServer()).put(`/api/v1/report-templates/${TID}`).send({ name: "x" });
+      expect(res.status).toBe(400);
+      expect(mocks.reportTemplateCollection.updateOne).not.toHaveBeenCalled();
+    });
+
+    it("PUT /:id?projectId scopes both the existence check and the update to { projectId, id }", async () => {
+      (mocks.reportTemplateCollection.findOne as any).mockResolvedValue(seededTemplate);
+      const res = await request(testServer())
+        .put(`/api/v1/report-templates/${TID}?projectId=${TEST_PROJECT_ID}`)
+        .send({ name: "Renamed" });
+      expect(res.status).toBe(200);
+      expect(mocks.reportTemplateCollection.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: TEST_PROJECT_ID, id: TID })
+      );
+      expect(mocks.reportTemplateCollection.updateOne).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: TEST_PROJECT_ID, id: TID }),
+        expect.anything()
+      );
+    });
+
+    it("DELETE /:id without projectId → 400 (never a global slug-only soft-delete)", async () => {
+      const res = await request(testServer()).delete(`/api/v1/report-templates/${TID}`);
+      expect(res.status).toBe(400);
+      expect(mocks.reportTemplateCollection.updateOne).not.toHaveBeenCalled();
+    });
+
+    it("DELETE /:id?projectId soft-deletes scoped to { projectId, id }", async () => {
+      (mocks.reportTemplateCollection.findOne as any).mockResolvedValue(seededTemplate);
+      const res = await request(testServer()).delete(`/api/v1/report-templates/${TID}?projectId=${TEST_PROJECT_ID}`);
+      expect(res.status).toBe(204);
+      expect(mocks.reportTemplateCollection.updateOne).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: TEST_PROJECT_ID, id: TID }),
+        expect.objectContaining({ $set: expect.objectContaining({ deletedAt: expect.anything() }) })
+      );
     });
   });
 
@@ -998,7 +1224,7 @@ describe("API Endpoints", () => {
         toArray: vi.fn().mockResolvedValue(flags),
       });
 
-      const res = await request(app).get("/api/v1/feature-flags");
+      const res = await request(testServer()).get("/api/v1/feature-flags");
       expect(res.status).toBe(200);
       expect(Array.isArray(res.body)).toBe(true);
     });
@@ -1015,7 +1241,7 @@ describe("API Endpoints", () => {
         toArray: vi.fn().mockResolvedValue(skills),
       });
 
-      const res = await request(app).get("/api/v1/skills");
+      const res = await request(testServer()).get(`/api/v1/skills?projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(200);
       expect(Array.isArray(res.body)).toBe(true);
       expect(res.body[0]).toHaveProperty("id", "org/repo/skill");
@@ -1028,14 +1254,15 @@ describe("API Endpoints", () => {
       (mocks.skillCollection.insertOne as any).mockResolvedValue({ acknowledged: true });
       (mocks.skillResolver.resolve as any).mockResolvedValue({ ref: "mock-ref" });
 
-      const res = await request(app)
-        .post("/api/v1/skills")
+      const res = await request(testServer())
+        .post(`/api/v1/skills?projectId=${TEST_PROJECT_ID}`)
         .send({ source: "org/repo", skillName: "my-skill", name: "My Skill", origin: "manual" });
 
       expect(res.status).toBe(201);
       expect(res.body).toHaveProperty("id", "org/repo/my-skill");
       expect(mocks.skillResolver.resolve).toHaveBeenCalledOnce();
       expect(mocks.skillResolver.resolve).toHaveBeenCalledWith(
+        TEST_PROJECT_ID,
         "org/repo",
         "my-skill",
         mocks.skillRevisionStore,
@@ -1049,8 +1276,8 @@ describe("API Endpoints", () => {
       (mocks.skillResolver.resolve as any).mockRejectedValue(new Error("GitHub 404"));
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      const res = await request(app)
-        .post("/api/v1/skills")
+      const res = await request(testServer())
+        .post(`/api/v1/skills?projectId=${TEST_PROJECT_ID}`)
         .send({ source: "org/repo", skillName: "missing-skill", name: "Missing", origin: "manual" });
 
       expect(res.status).toBe(201);
@@ -1077,8 +1304,8 @@ describe("API Endpoints", () => {
       (mocks.skillCollection.updateOne as any).mockResolvedValue({ acknowledged: true });
       (mocks.skillResolver.resolve as any).mockResolvedValue({ ref: "mock-ref" });
 
-      const res = await request(app)
-        .post("/api/v1/skills")
+      const res = await request(testServer())
+        .post(`/api/v1/skills?projectId=${TEST_PROJECT_ID}`)
         .send({ source: "org/repo", skillName: "my-skill", name: "New Name", origin: "manual" });
 
       expect(res.status).toBe(200);
@@ -1088,12 +1315,12 @@ describe("API Endpoints", () => {
 
   describe("GET /api/v1/skills/discover", () => {
     it("returns 400 when source query parameter is missing", async () => {
-      const res = await request(app).get("/api/v1/skills/discover");
+      const res = await request(testServer()).get(`/api/v1/skills/discover?projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(400);
     });
 
     it("returns 400 when source is malformed", async () => {
-      const res = await request(app).get("/api/v1/skills/discover?source=not-a-repo");
+      const res = await request(testServer()).get(`/api/v1/skills/discover?source=not-a-repo&projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(400);
     });
 
@@ -1104,7 +1331,7 @@ describe("API Endpoints", () => {
       ];
       mocks.skillResolver.discoverSkills = vi.fn().mockResolvedValue(discovered);
 
-      const res = await request(app).get("/api/v1/skills/discover?source=Azure/documentdb-agent-kit");
+      const res = await request(testServer()).get(`/api/v1/skills/discover?source=Azure/documentdb-agent-kit&projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(200);
       // Route enriches each result with library state. With an empty skill
       // collection, every discovered skill is reported as new.
@@ -1115,14 +1342,14 @@ describe("API Endpoints", () => {
     it("returns 404 when the repository is not found", async () => {
       mocks.skillResolver.discoverSkills = vi.fn().mockRejectedValue(new Error('Repository "owner/missing" not found'));
 
-      const res = await request(app).get("/api/v1/skills/discover?source=owner/missing");
+      const res = await request(testServer()).get(`/api/v1/skills/discover?source=owner/missing&projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(404);
     });
 
     it("returns 502 on other GitHub errors", async () => {
       mocks.skillResolver.discoverSkills = vi.fn().mockRejectedValue(new Error("rate limit exceeded"));
 
-      const res = await request(app).get("/api/v1/skills/discover?source=owner/repo");
+      const res = await request(testServer()).get(`/api/v1/skills/discover?source=owner/repo&projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(502);
     });
   });
@@ -1138,7 +1365,7 @@ describe("API Endpoints", () => {
         toArray: vi.fn().mockResolvedValue(features),
       });
 
-      const res = await request(app).get("/api/v1/prompt-features");
+      const res = await request(testServer()).get(`/api/v1/prompt-features?projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(200);
       expect(Array.isArray(res.body)).toBe(true);
     });
@@ -1148,8 +1375,8 @@ describe("API Endpoints", () => {
     it("returns 201 when creating a prompt feature", async () => {
       (mocks.promptFeatureCollection.findOne as any).mockResolvedValue(null);
 
-      const res = await request(app)
-        .post("/api/v1/prompt-features")
+      const res = await request(testServer())
+        .post(`/api/v1/prompt-features?projectId=${TEST_PROJECT_ID}`)
         .send({ id: "new_feature", prompt: "Does it have X?" });
 
       expect(res.status).toBe(201);
@@ -1157,8 +1384,8 @@ describe("API Endpoints", () => {
     });
 
     it("returns 400 when id has invalid format", async () => {
-      const res = await request(app)
-        .post("/api/v1/prompt-features")
+      const res = await request(testServer())
+        .post(`/api/v1/prompt-features?projectId=${TEST_PROJECT_ID}`)
         .send({ id: "Invalid-ID", prompt: "Bad id" });
 
       expect(res.status).toBe(400);
@@ -1167,8 +1394,8 @@ describe("API Endpoints", () => {
     it("persists type=agents.md when creating a feature", async () => {
       (mocks.promptFeatureCollection.findOne as any).mockResolvedValue(null);
 
-      const res = await request(app)
-        .post("/api/v1/prompt-features")
+      const res = await request(testServer())
+        .post(`/api/v1/prompt-features?projectId=${TEST_PROJECT_ID}`)
         .send({ id: "agents_feat", prompt: "Does AGENTS.md mention tests?", type: "agents.md" });
 
       expect(res.status).toBe(201);
@@ -1184,7 +1411,7 @@ describe("API Endpoints", () => {
         toArray: vi.fn().mockResolvedValue([]),
       });
 
-      const res = await request(app).get("/api/v1/prompt-features?type=agents.md");
+      const res = await request(testServer()).get(`/api/v1/prompt-features?type=agents.md&projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(200);
       const filter = (mocks.promptFeatureCollection.find as any).mock.calls[0][0];
       expect(JSON.stringify(filter)).toContain("agents.md");
@@ -1195,7 +1422,7 @@ describe("API Endpoints", () => {
         toArray: vi.fn().mockResolvedValue([]),
       });
 
-      await request(app).get("/api/v1/prompt-features?type=select");
+      await request(testServer()).get(`/api/v1/prompt-features?type=select&projectId=${TEST_PROJECT_ID}`);
       const filter = (mocks.promptFeatureCollection.find as any).mock.calls[0][0];
       const json = JSON.stringify(filter);
       expect(json).toContain("$exists");
@@ -1211,7 +1438,7 @@ describe("API Endpoints", () => {
         createdAt: new Date(),
       });
 
-      const res = await request(app).get("/api/v1/prompt-features/pf1");
+      const res = await request(testServer()).get(`/api/v1/prompt-features/pf1?projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(200);
       expect(res.body).toHaveProperty("id", "pf1");
     });
@@ -1219,7 +1446,7 @@ describe("API Endpoints", () => {
     it("returns 404 when prompt feature not found", async () => {
       (mocks.promptFeatureCollection.findOne as any).mockResolvedValue(null);
 
-      const res = await request(app).get("/api/v1/prompt-features/missing");
+      const res = await request(testServer()).get(`/api/v1/prompt-features/missing?projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(404);
     });
   });
@@ -1235,7 +1462,7 @@ describe("API Endpoints", () => {
         total: 1,
       });
 
-      const res = await request(app).get("/api/v1/task-prompts");
+      const res = await request(testServer()).get(`/api/v1/task-prompts?projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(200);
       expect(res.body).toHaveProperty("items");
       expect(res.body).toHaveProperty("total", 1);
@@ -1250,7 +1477,7 @@ describe("API Endpoints", () => {
         createdAt: new Date(),
       });
 
-      const res = await request(app).get("/api/v1/task-prompts/tp1");
+      const res = await request(testServer()).get("/api/v1/task-prompts/tp1");
       expect(res.status).toBe(200);
       expect(res.body).toHaveProperty("_id", "tp1");
     });
@@ -1258,7 +1485,7 @@ describe("API Endpoints", () => {
     it("returns 404 when task prompt not found", async () => {
       (mocks.taskPromptStore as any).get.mockResolvedValue(null);
 
-      const res = await request(app).get("/api/v1/task-prompts/missing");
+      const res = await request(testServer()).get("/api/v1/task-prompts/missing");
       expect(res.status).toBe(404);
     });
   });
@@ -1271,8 +1498,8 @@ describe("API Endpoints", () => {
         createdAt: new Date(),
       });
 
-      const res = await request(app)
-        .post("/api/v1/task-prompts")
+      const res = await request(testServer())
+        .post(`/api/v1/task-prompts?projectId=${TEST_PROJECT_ID}`)
         .send({ text: "New task" });
 
       expect(res.status).toBe(201);
@@ -1280,8 +1507,8 @@ describe("API Endpoints", () => {
     });
 
     it("returns 400 when text is missing", async () => {
-      const res = await request(app)
-        .post("/api/v1/task-prompts")
+      const res = await request(testServer())
+        .post(`/api/v1/task-prompts?projectId=${TEST_PROJECT_ID}`)
         .send({});
 
       expect(res.status).toBe(400);
@@ -1296,7 +1523,7 @@ describe("API Endpoints", () => {
     it("passes ?type=agents.md through to the store getAll filter", async () => {
       (mocks.taskPromptStore as any).getAll.mockResolvedValue({ items: [], total: 0 });
 
-      const res = await request(app).get("/api/v1/task-prompts?type=agents.md");
+      const res = await request(testServer()).get(`/api/v1/task-prompts?type=agents.md&projectId=${TEST_PROJECT_ID}`);
       expect(res.status).toBe(200);
       const arg = (mocks.taskPromptStore.getAll as any).mock.calls[0][0];
       expect(arg).toHaveProperty("type", "agents.md");
@@ -1310,15 +1537,16 @@ describe("API Endpoints", () => {
         createdAt: new Date(),
       });
 
-      const res = await request(app)
-        .post("/api/v1/task-prompts")
+      const res = await request(testServer())
+        .post(`/api/v1/task-prompts?projectId=${TEST_PROJECT_ID}`)
         .send({ text: "# AGENTS\nBe concise.", type: "agents.md" });
 
       expect(res.status).toBe(201);
       expect(res.body).toHaveProperty("type", "agents.md");
       const arg = (mocks.taskPromptStore.findOrCreate as any).mock.calls[0];
-      expect(arg[0]).toBe("# AGENTS\nBe concise.");
-      expect(arg[1]).toBe("agents.md");
+      expect(arg[0]).toBe(TEST_PROJECT_ID);
+      expect(arg[1]).toBe("# AGENTS\nBe concise.");
+      expect(arg[2]).toBe("agents.md");
     });
 
     it("GET /:id/content resolves the prompt body via resolvePromptText", async () => {
@@ -1330,7 +1558,7 @@ describe("API Endpoints", () => {
       });
       (mocks.taskPromptStore as any).resolvePromptText.mockResolvedValue("resolved body");
 
-      const res = await request(app).get("/api/v1/task-prompts/agents-1/content");
+      const res = await request(testServer()).get("/api/v1/task-prompts/agents-1/content");
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ id: "agents-1", text: "resolved body" });
       expect(mocks.taskPromptStore.resolvePromptText).toHaveBeenCalled();
@@ -1339,7 +1567,7 @@ describe("API Endpoints", () => {
     it("GET /:id/content returns 404 when the prompt does not exist", async () => {
       (mocks.taskPromptStore as any).get.mockResolvedValue(null);
 
-      const res = await request(app).get("/api/v1/task-prompts/missing/content");
+      const res = await request(testServer()).get("/api/v1/task-prompts/missing/content");
       expect(res.status).toBe(404);
     });
   });
@@ -1349,6 +1577,37 @@ describe("API Endpoints", () => {
   // ===================================================================
 
   describe("POST /api/v1/requests?worker=... (profile)", () => {
+    const resourceRevision = {
+      _id: "rev-github-simulator-1",
+      resourceId: "res-github-simulator",
+      projectId: TEST_PROJECT_ID,
+      slug: "github-simulator",
+      revisionNumber: 1,
+      ref: "github-simulator@r1",
+      setup: { sh: "echo SIMULATOR_URL=http://sim >> $SCOPE_SETUP_ENV" },
+      exports: ["SIMULATOR_URL"],
+      parameters: [
+        { name: "REPO", required: true },
+        { name: "AS", required: false },
+      ],
+      contentSha256: "sha",
+      createdAt: new Date(),
+    };
+
+    function mockGithubSimulatorResource() {
+      (mocks.resourceStore.getBySlug as any).mockResolvedValue({
+        _id: "res-github-simulator",
+        projectId: TEST_PROJECT_ID,
+        slug: "github-simulator",
+        name: "GitHub Simulator",
+        revisionCounter: 1,
+        latestRevisionId: resourceRevision._id,
+        latestRevisionNumber: 1,
+        createdAt: new Date(),
+      });
+      (mocks.resourceRevisionStore.getLatest as any).mockResolvedValue(resourceRevision);
+    }
+
     it("applies profile fields server-side, ignoring client-omitted fields", async () => {
       (mocks.profileCollection.findOne as any).mockResolvedValue({
         _id: "profile-1",
@@ -1360,6 +1619,7 @@ describe("API Endpoints", () => {
         profileId: "profile-1",
         version: 1,
         workerType: "coder-acp-copilot",
+        agentVersion: "v1",
         model: "claude-sonnet-4",
         mcpServers: ["ms-learn"],
         skillRevisions: ["github/awesome-copilot/cosmosdb@abc123"],
@@ -1367,7 +1627,11 @@ describe("API Endpoints", () => {
       });
       (mocks.agentCollection.findOne as any).mockResolvedValue({
         _id: "coder-acp-copilot",
-        versions: [{ agentVersion: "v1", status: "active", createdAt: new Date() }],
+        available: true,
+        versions: [
+          { agentVersion: "v1", status: "active", queueName: "queue-coder-acp-copilot-v1", createdAt: new Date("2026-01-01") },
+          { agentVersion: "v2", status: "active", queueName: "queue-coder-acp-copilot-v2", createdAt: new Date("2026-02-01") },
+        ],
         supportedModels: ["claude-sonnet-4"],
       });
       // resolveSkillSpecs will validate the skill slug exists
@@ -1384,11 +1648,12 @@ describe("API Endpoints", () => {
         toArray: vi.fn().mockResolvedValue([{ _id: "ms-learn" }]),
       });
 
-      const res = await request(app)
-        .post("/api/v1/requests?worker=coder-acp-copilot")
+      const res = await request(testServer())
+        .post(`/api/v1/requests?worker=coder-acp-copilot&projectId=${TEST_PROJECT_ID}`)
         .send({
           scenario: { task: "Build something", criteria: ["works"] },
           profileId: "profile-1",
+          agentVersion: "v2",
           // Client omits model, mcpServers, skills, extensions — profile provides them
         });
 
@@ -1399,6 +1664,7 @@ describe("API Endpoints", () => {
       expect(doc).toHaveProperty("skillRevisions", ["github/awesome-copilot/cosmosdb@abc123"]);
       expect(doc).toHaveProperty("profileId", "profile-1");
       expect(doc).toHaveProperty("profileVersionId", "pv-1");
+      expect(doc).toHaveProperty("agentVersion", "v1");
     });
 
     it("returns 400 when client sends fields conflicting with profile", async () => {
@@ -1418,8 +1684,8 @@ describe("API Endpoints", () => {
         extensions: [],
       });
 
-      const res = await request(app)
-        .post("/api/v1/requests?worker=coder-acp-copilot")
+      const res = await request(testServer())
+        .post(`/api/v1/requests?worker=coder-acp-copilot&projectId=${TEST_PROJECT_ID}`)
         .send({
           scenario: { task: "Build something", criteria: ["works"] },
           profileId: "profile-1",
@@ -1432,16 +1698,159 @@ describe("API Endpoints", () => {
         expect.arrayContaining([expect.stringContaining("model")])
       );
     });
-  });
 
-  // ===================================================================
-  // Reasoning effort validation
-  // ===================================================================
+    it("rejects an MCP slug that belongs to another project (project-scoped validation)", async () => {
+      (mocks.profileCollection.findOne as any).mockResolvedValue({
+        _id: "profile-1",
+        name: "My Profile",
+        latestVersion: 1,
+      });
+      (mocks.profileVersionCollection.findOne as any).mockResolvedValue({
+        _id: "pv-1",
+        profileId: "profile-1",
+        version: 1,
+        workerType: "coder-acp-copilot",
+        model: "claude-sonnet-4",
+        mcpServers: ["ms-learn"], // slug exists, but only in a different project
+        skillRevisions: [],
+        extensions: [],
+      });
+      (mocks.agentCollection.findOne as any).mockResolvedValue({
+        _id: "coder-acp-copilot",
+        available: true,
+        versions: [{ agentVersion: "v1", status: "active", queueName: "queue-coder-acp-copilot", createdAt: new Date() }],
+        supportedModels: ["claude-sonnet-4"],
+      });
+      // The project-scoped lookup finds nothing — the slug lives in another project.
+      const findSpy = vi.fn().mockReturnValue({ toArray: vi.fn().mockResolvedValue([]) });
+      (mocks.mcpServerCollection.find as any) = findSpy;
+
+      const res = await request(testServer())
+        .post(`/api/v1/requests?worker=coder-acp-copilot&projectId=${TEST_PROJECT_ID}`)
+        .send({
+          scenario: { task: "Build something", criteria: ["works"] },
+          profileId: "profile-1",
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("MCP server(s) not found");
+      expect(res.body.error).toContain("ms-learn");
+      // Validation query must be scoped to the request's project.
+      const filter = findSpy.mock.calls[0][0];
+      expect(filter).toHaveProperty("projectId", TEST_PROJECT_ID);
+    });
+
+    it("returns 400 when a run resource param uses an unknown key", async () => {
+      mockGithubSimulatorResource();
+
+      const res = await request(testServer())
+        .post(`/api/v1/requests?worker=coder-acp-copilot&projectId=${TEST_PROJECT_ID}`)
+        .send({
+          scenario: { task: "Build something", criteria: ["works"] },
+          model: "gpt-4o",
+          resources: [{ ref: "github-simulator", params: { REPO: "octo/api", REPOS: "typo/value" } }],
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('unknown parameter "REPOS"');
+      expect(mocks.collection.insertOne).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 when a required resource param is missing", async () => {
+      mockGithubSimulatorResource();
+
+      const res = await request(testServer())
+        .post(`/api/v1/requests?worker=coder-acp-copilot&projectId=${TEST_PROJECT_ID}`)
+        .send({
+          scenario: { task: "Build something", criteria: ["works"] },
+          model: "gpt-4o",
+          resources: ["github-simulator"],
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('missing required parameter "REPO"');
+      expect(mocks.collection.insertOne).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 with the parameter when a run overrides a profile-pinned resource param", async () => {
+      mockGithubSimulatorResource();
+      (mocks.profileCollection.findOne as any).mockResolvedValue({
+        _id: "profile-1",
+        name: "My Profile",
+        latestVersion: 1,
+      });
+      (mocks.profileVersionCollection.findOne as any).mockResolvedValue({
+        _id: "pv-1",
+        profileId: "profile-1",
+        version: 1,
+        workerType: "coder-acp-copilot",
+        model: "gpt-4o",
+        mcpServers: [],
+        skillRevisions: [],
+        resources: [{ ref: "github-simulator", params: { REPO: "pinned/repo" } }],
+        extensions: [],
+      });
+
+      const res = await request(testServer())
+        .post(`/api/v1/requests?worker=coder-acp-copilot&projectId=${TEST_PROJECT_ID}`)
+        .send({
+          scenario: { task: "Build something", criteria: ["works"] },
+          profileId: "profile-1",
+          resources: [{ ref: "github-simulator", params: { REPO: "run/repo" } }],
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("controls these fields");
+      expect(res.body.conflicts).toEqual(
+        expect.arrayContaining([expect.stringContaining("resources.github-simulator@r1.REPO")])
+      );
+      expect(mocks.collection.insertOne).not.toHaveBeenCalled();
+    });
+
+    it("accepts a run filling a profile-unset resource param", async () => {
+      mockGithubSimulatorResource();
+      (mocks.profileCollection.findOne as any).mockResolvedValue({
+        _id: "profile-1",
+        name: "My Profile",
+        latestVersion: 1,
+      });
+      (mocks.profileVersionCollection.findOne as any).mockResolvedValue({
+        _id: "pv-1",
+        profileId: "profile-1",
+        version: 1,
+        workerType: "coder-acp-copilot",
+        model: "gpt-4o",
+        mcpServers: [],
+        skillRevisions: [],
+        resources: [{ ref: "github-simulator", params: { AS: "pinned/ns" } }],
+        extensions: [],
+      });
+
+      const res = await request(testServer())
+        .post(`/api/v1/requests?worker=coder-acp-copilot&projectId=${TEST_PROJECT_ID}`)
+        .send({
+          scenario: { task: "Build something", criteria: ["works"] },
+          profileId: "profile-1",
+          resources: [{ ref: "github-simulator", params: { REPO: "run/repo" } }],
+        });
+
+      expect(res.status).toBe(201);
+      const doc = (mocks.collection.insertOne as any).mock.calls[0][0];
+      expect(doc.resources).toEqual([
+        {
+          ref: "github-simulator@r1",
+          revisionId: "rev-github-simulator-1",
+          params: { REPO: "run/repo", AS: "pinned/ns" },
+        },
+      ]);
+    });
+  });
 
   describe("POST /api/v1/requests?worker=... (reasoning effort)", () => {
     it("rejects when effort is incompatible with model capabilities", async () => {
       (mocks.agentCollection.findOne as any).mockResolvedValue({
         _id: "coder-acp-copilot",
+        available: true,
         versions: [{ agentVersion: "v1", status: "active", queueName: "queue-coder-acp-copilot", createdAt: new Date() }],
         supportedModels: ["claude-opus-4.6"],
       });
@@ -1450,8 +1859,8 @@ describe("API Endpoints", () => {
         capabilities: { reasoningEffort: ["low", "medium", "high"] },
       });
 
-      const res = await request(app)
-        .post("/api/v1/requests?worker=coder-acp-copilot")
+      const res = await request(testServer())
+        .post(`/api/v1/requests?worker=coder-acp-copilot&projectId=${TEST_PROJECT_ID}`)
         .send({
           scenario: { task: "Build something", criteria: ["works"] },
           model: "claude-opus-4.6",
@@ -1466,6 +1875,7 @@ describe("API Endpoints", () => {
     it("accepts valid effort and stores it on the run", async () => {
       (mocks.agentCollection.findOne as any).mockResolvedValue({
         _id: "coder-acp-copilot",
+        available: true,
         versions: [{ agentVersion: "v1", status: "active", queueName: "queue-coder-acp-copilot", createdAt: new Date() }],
         supportedModels: ["claude-opus-4.6"],
       });
@@ -1474,8 +1884,8 @@ describe("API Endpoints", () => {
         capabilities: { reasoningEffort: ["low", "medium", "high"] },
       });
 
-      const res = await request(app)
-        .post("/api/v1/requests?worker=coder-acp-copilot")
+      const res = await request(testServer())
+        .post(`/api/v1/requests?worker=coder-acp-copilot&projectId=${TEST_PROJECT_ID}`)
         .send({
           scenario: { task: "Build something", criteria: ["works"] },
           model: "claude-opus-4.6",
@@ -1506,6 +1916,7 @@ describe("API Endpoints", () => {
       });
       (mocks.agentCollection.findOne as any).mockResolvedValue({
         _id: "coder-acp-copilot",
+        available: true,
         versions: [{ agentVersion: "v1", status: "active", queueName: "queue-coder-acp-copilot", createdAt: new Date() }],
         supportedModels: ["claude-opus-4.6"],
       });
@@ -1514,8 +1925,8 @@ describe("API Endpoints", () => {
         capabilities: { reasoningEffort: ["low", "medium", "high"] },
       });
 
-      const res = await request(app)
-        .post("/api/v1/requests?worker=coder-acp-copilot")
+      const res = await request(testServer())
+        .post(`/api/v1/requests?worker=coder-acp-copilot&projectId=${TEST_PROJECT_ID}`)
         .send({
           scenario: { task: "Build something", criteria: ["works"] },
           profileId: "profile-1",
@@ -1530,6 +1941,7 @@ describe("API Endpoints", () => {
     it("returns warnings for models with limited effort support when no effort is specified", async () => {
       (mocks.agentCollection.findOne as any).mockResolvedValue({
         _id: "coder-acp-copilot",
+        available: true,
         versions: [{ agentVersion: "v1", status: "active", queueName: "queue-coder-acp-copilot", createdAt: new Date() }],
         supportedModels: ["claude-haiku"],
       });
@@ -1538,8 +1950,8 @@ describe("API Endpoints", () => {
         capabilities: { reasoningEffort: ["low"] },
       });
 
-      const res = await request(app)
-        .post("/api/v1/requests?worker=coder-acp-copilot")
+      const res = await request(testServer())
+        .post(`/api/v1/requests?worker=coder-acp-copilot&projectId=${TEST_PROJECT_ID}`)
         .send({
           scenario: { task: "Build something", criteria: ["works"] },
           model: "claude-haiku",
@@ -1559,6 +1971,7 @@ describe("API Endpoints", () => {
     const setupCopilotAgent = () => {
       (mocks.agentCollection.findOne as any).mockResolvedValue({
         _id: "coder-acp-copilot",
+        available: true,
         versions: [{ agentVersion: "v1", status: "active", queueName: "queue-coder-acp-copilot", createdAt: new Date() }],
         supportedModels: ["claude-haiku-4.5"],
       });
@@ -1573,8 +1986,8 @@ describe("API Endpoints", () => {
         createdAt: new Date(),
       });
 
-      const res = await request(app)
-        .post("/api/v1/requests?worker=coder-acp-copilot")
+      const res = await request(testServer())
+        .post(`/api/v1/requests?worker=coder-acp-copilot&projectId=${TEST_PROJECT_ID}`)
         .send({
           scenario: { task: "Build something", criteria: ["works"] },
           model: "claude-haiku-4.5",
@@ -1583,10 +1996,11 @@ describe("API Endpoints", () => {
 
       expect(res.status).toBe(201);
       const foc = (mocks.taskPromptStore.findOrCreate as any).mock.calls.find(
-        (c: any[]) => c[1] === "agents.md"
+        (c: any[]) => c[2] === "agents.md"
       );
       expect(foc).toBeDefined();
-      expect(foc[0]).toBe("# AGENTS\nBe terse.");
+      expect(foc[0]).toBe(TEST_PROJECT_ID);
+      expect(foc[1]).toBe("# AGENTS\nBe terse.");
       const doc = (mocks.collection.insertOne as any).mock.calls[0][0];
       expect(doc).toHaveProperty("agentsMdPromptId", "agents-xyz");
     });
@@ -1600,8 +2014,8 @@ describe("API Endpoints", () => {
         createdAt: new Date(),
       });
 
-      const res = await request(app)
-        .post("/api/v1/requests?worker=coder-acp-copilot")
+      const res = await request(testServer())
+        .post(`/api/v1/requests?worker=coder-acp-copilot&projectId=${TEST_PROJECT_ID}`)
         .send({
           scenario: { task: "Build something", criteria: ["works"] },
           model: "claude-haiku-4.5",
@@ -1617,8 +2031,8 @@ describe("API Endpoints", () => {
     it("omits AGENTS.md fields when not provided", async () => {
       setupCopilotAgent();
 
-      const res = await request(app)
-        .post("/api/v1/requests?worker=coder-acp-copilot")
+      const res = await request(testServer())
+        .post(`/api/v1/requests?worker=coder-acp-copilot&projectId=${TEST_PROJECT_ID}`)
         .send({
           scenario: { task: "Build something", criteria: ["works"] },
           model: "claude-haiku-4.5",
@@ -1639,8 +2053,9 @@ describe("API Endpoints", () => {
     beforeEach(() => {
       (mocks.agentCollection.findOne as any).mockResolvedValue({
         _id: "coder-acp-copilot",
+        available: true,
         versions: [{ agentVersion: "v1", status: "active", queueName: "queue-coder-acp-copilot", createdAt: new Date() }],
-        supportedModels: [],
+        supportedModels: ["m1", "m2"],
       });
       // Build gate criterion is compatible with the build gate; "works" is
       // compatible with all gates (no gates restriction).
@@ -1652,7 +2067,7 @@ describe("API Endpoints", () => {
       });
       // findOrCreate: select task (1 arg) vs typed gate prompt (text, gate).
       (mocks.taskPromptStore.findOrCreate as any).mockImplementation(
-        async (text: string, type?: string) => ({ _id: type ? `tp-${type}` : "tp-select", text, type }),
+        async (_projectId: string, text: string, type?: string) => ({ _id: type ? `tp-${type}` : "tp-select", text, type }),
       );
       // The resolved gate prompt id resolves to a prompt whose type === gate.
       (mocks.taskPromptCollection.findOne as any).mockImplementation(
@@ -1661,8 +2076,8 @@ describe("API Endpoints", () => {
     });
 
     it("materializes a free-text gate prompt into a typed prompt and persists the resolved id", async () => {
-      const res = await request(app)
-        .post("/api/v1/requests?worker=coder-acp-copilot")
+      const res = await request(testServer())
+        .post(`/api/v1/requests?worker=coder-acp-copilot&projectId=${TEST_PROJECT_ID}`)
         .send({
           scenario: { task: "Build something", criteria: ["works"] },
           gates: [
@@ -1672,7 +2087,7 @@ describe("API Endpoints", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(mocks.taskPromptStore.findOrCreate).toHaveBeenCalledWith("Build the project and fix errors.", "build");
+      expect(mocks.taskPromptStore.findOrCreate).toHaveBeenCalledWith(TEST_PROJECT_ID, "Build the project and fix errors.", "build");
       const doc = (mocks.collection.insertOne as any).mock.calls[0][0];
       const buildGate = doc.gates.find((g: { gate: string }) => g.gate === "build");
       expect(buildGate.promptId).toBe("tp-build");
@@ -1680,8 +2095,8 @@ describe("API Endpoints", () => {
     });
 
     it("lets promptText supersede a provided promptId", async () => {
-      const res = await request(app)
-        .post("/api/v1/requests?worker=coder-acp-copilot")
+      const res = await request(testServer())
+        .post(`/api/v1/requests?worker=coder-acp-copilot&projectId=${TEST_PROJECT_ID}`)
         .send({
           scenario: { task: "Build something", criteria: ["works"] },
           gates: [
@@ -1691,15 +2106,15 @@ describe("API Endpoints", () => {
         });
 
       expect(res.status).toBe(201);
-      expect(mocks.taskPromptStore.findOrCreate).toHaveBeenCalledWith("Fresh build prompt.", "build");
+      expect(mocks.taskPromptStore.findOrCreate).toHaveBeenCalledWith(TEST_PROJECT_ID, "Fresh build prompt.", "build");
       const doc = (mocks.collection.insertOne as any).mock.calls[0][0];
       const buildGate = doc.gates.find((g: { gate: string }) => g.gate === "build");
       expect(buildGate.promptId).toBe("tp-build");
     });
 
     it("returns 400 when a non-select gate has neither promptId nor promptText", async () => {
-      const res = await request(app)
-        .post("/api/v1/requests?worker=coder-acp-copilot")
+      const res = await request(testServer())
+        .post(`/api/v1/requests?worker=coder-acp-copilot&projectId=${TEST_PROJECT_ID}`)
         .send({
           scenario: { task: "Build something", criteria: ["works"] },
           gates: [
@@ -1742,8 +2157,9 @@ describe("API Endpoints", () => {
       );
       (mocks.agentCollection.findOne as any).mockResolvedValue({
         _id: "coder-acp-copilot",
+        available: true,
         versions: [{ agentVersion: "v1", status: "active", queueName: "queue-coder-acp-copilot", createdAt: new Date() }],
-        supportedModels: [],
+        supportedModels: ["m1", "m2"],
       });
       (mocks.criteriaCollection.find as any).mockReturnValue({
         toArray: vi.fn().mockResolvedValue([
@@ -1752,7 +2168,7 @@ describe("API Endpoints", () => {
         ]),
       });
       (mocks.taskPromptStore.findOrCreate as any).mockImplementation(
-        async (text: string, type?: string) => ({ _id: type ? `tp-${type}` : "tp-select", text, type }),
+        async (_projectId: string, text: string, type?: string) => ({ _id: type ? `tp-${type}` : "tp-select", text, type }),
       );
       (mocks.taskPromptCollection.findOne as any).mockImplementation(
         async (q: { _id: string }) => ({ _id: q._id, type: q._id.replace("tp-", "") }),
@@ -1760,8 +2176,8 @@ describe("API Endpoints", () => {
     });
 
     it("persists the same resolved gates on every variation request doc", async () => {
-      const res = await request(app)
-        .post("/api/v1/requests")
+      const res = await request(testServer())
+        .post(`/api/v1/requests?projectId=${TEST_PROJECT_ID}`)
         .send({
           scenario: { task: "Build something", criteria: ["works"] },
           profileId: "base-profile",
@@ -1774,7 +2190,7 @@ describe("API Endpoints", () => {
 
       expect(res.status).toBe(201);
       // Free-text gate prompt is materialized into a typed prompt.
-      expect(mocks.taskPromptStore.findOrCreate).toHaveBeenCalledWith("Build the project and fix errors.", "build");
+      expect(mocks.taskPromptStore.findOrCreate).toHaveBeenCalledWith(TEST_PROJECT_ID, "Build the project and fix errors.", "build");
 
       const docs = (mocks.collection.insertMany as any).mock.calls[0][0];
       // base + 1 variation = 2 request docs, each carrying the gates.
@@ -1798,8 +2214,8 @@ describe("API Endpoints", () => {
     });
 
     it("fails the whole submit (400) without inserting when a gate is invalid", async () => {
-      const res = await request(app)
-        .post("/api/v1/requests")
+      const res = await request(testServer())
+        .post(`/api/v1/requests?projectId=${TEST_PROJECT_ID}`)
         .send({
           scenario: { task: "Build something", criteria: ["works"] },
           profileId: "base-profile",
@@ -1844,13 +2260,14 @@ describe("API Endpoints", () => {
 
       (mocks.agentCollection.findOne as any).mockResolvedValue({
         _id: "coder-acp-copilot",
+        available: true,
         versions: [
           { agentVersion: "copilot-0.0.420", queueName: "queue-coder-acp-copilot", status: "active", createdAt: new Date() },
         ],
-        supportedModels: ["gpt-4o"],
+        supportedModels: ["gpt-4o", "claude-sonnet-4"],
       });
 
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/requests/bulk-resubmit")
         .send({ ids: ["run-original"], count: 1, overrides: { reasoningEffort: "high" } });
 
@@ -1881,13 +2298,14 @@ describe("API Endpoints", () => {
 
       (mocks.agentCollection.findOne as any).mockResolvedValue({
         _id: "coder-acp-copilot",
+        available: true,
         versions: [
           { agentVersion: "copilot-0.0.420", queueName: "queue-coder-acp-copilot", status: "active", createdAt: new Date() },
         ],
         supportedModels: ["gpt-4o"],
       });
 
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/requests/bulk-resubmit")
         .send({ ids: ["run-original"], count: 1, overrides: { reasoningEffort: null } });
 
@@ -1928,13 +2346,14 @@ describe("API Endpoints", () => {
       // Mock agentCollection.findOne to return an agent with an active version
       (mocks.agentCollection.findOne as any).mockResolvedValue({
         _id: "coder-acp-copilot",
+        available: true,
         versions: [
           { agentVersion: "copilot-0.0.420", queueName: "queue-coder-acp-copilot", status: "active", createdAt: new Date() },
         ],
         supportedModels: ["gpt-4o"],
       });
 
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/requests/bulk-resubmit")
         .send({ ids: ["run-original"], count: 1 });
 
@@ -1987,6 +2406,7 @@ describe("API Endpoints", () => {
 
       (mocks.agentCollection.findOne as any).mockResolvedValue({
         _id: "coder-vscode-insiders",
+        available: true,
         versions: [
           { agentVersion: "insiders-0.1.0", queueName: "queue-vscode-insiders", status: "active", createdAt: new Date() },
         ],
@@ -2002,7 +2422,7 @@ describe("API Endpoints", () => {
         ref: "skill-a@v1",
       });
 
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/requests/bulk-resubmit")
         .send({
           ids: ["run-original"],
@@ -2053,13 +2473,14 @@ describe("API Endpoints", () => {
 
       (mocks.agentCollection.findOne as any).mockResolvedValue({
         _id: "coder-acp-copilot",
+        available: true,
         versions: [
           { agentVersion: "copilot-0.0.420", queueName: "queue-coder-acp-copilot", status: "active", createdAt: new Date() },
         ],
-        supportedModels: ["gpt-4o"],
+        supportedModels: ["gpt-4o", "claude-sonnet-4"],
       });
 
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/requests/bulk-resubmit")
         .send({
           ids: ["run-original"],
@@ -2081,7 +2502,7 @@ describe("API Endpoints", () => {
     it("returns 404 when profile override references non-existent profile", async () => {
       (mocks.profileCollection.findOne as any).mockResolvedValue(null);
 
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/requests/bulk-resubmit")
         .send({
           ids: ["run-1"],
@@ -2110,7 +2531,7 @@ describe("API Endpoints", () => {
         extensions: [],
       });
 
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/requests/bulk-resubmit")
         .send({
           ids: ["run-1"],
@@ -2136,7 +2557,7 @@ describe("API Endpoints", () => {
   describe("GET /api/v1/requests/:id/runs", () => {
     it("returns 404 when request not found", async () => {
       (mocks.collection.findOne as any).mockResolvedValue(null);
-      const res = await request(app).get("/api/v1/requests/missing/runs");
+      const res = await request(testServer()).get("/api/v1/requests/missing/runs");
       expect(res.status).toBe(404);
     });
 
@@ -2152,7 +2573,7 @@ describe("API Endpoints", () => {
           ]),
         }),
       });
-      const res = await request(app).get("/api/v1/requests/req-1/runs");
+      const res = await request(testServer()).get("/api/v1/requests/req-1/runs");
       expect(res.status).toBe(200);
       expect(res.body).toHaveLength(2);
       expect(res.body[0]._id).toBe("run-2");
@@ -2166,7 +2587,7 @@ describe("API Endpoints", () => {
         _id: "req-1",
         run: { _id: "run-2", attemptNumber: 2, status: "pending" },
       });
-      const res = await request(app).get("/api/v1/requests/req-1/runs/run-2");
+      const res = await request(testServer()).get("/api/v1/requests/req-1/runs/run-2");
       expect(res.status).toBe(200);
       expect(res.body._id).toBe("run-2");
     });
@@ -2183,7 +2604,7 @@ describe("API Endpoints", () => {
         outcome: "failed",
         requestId: "req-1",
       });
-      const res = await request(app).get("/api/v1/requests/req-1/runs/run-1");
+      const res = await request(testServer()).get("/api/v1/requests/req-1/runs/run-1");
       expect(res.status).toBe(200);
       expect(res.body._id).toBe("run-1");
     });
@@ -2199,7 +2620,7 @@ describe("API Endpoints", () => {
         attemptNumber: 1,
         status: "done",
       });
-      const res = await request(app).get("/api/v1/requests/req-1/runs/run-x");
+      const res = await request(testServer()).get("/api/v1/requests/req-1/runs/run-x");
       expect(res.status).toBe(404);
     });
   });
@@ -2207,7 +2628,7 @@ describe("API Endpoints", () => {
   describe("POST /api/v1/requests/:id/retry", () => {
     it("returns 404 when request not found", async () => {
       (mocks.collection.findOne as any).mockResolvedValue(null);
-      const res = await request(app).post("/api/v1/requests/missing/retry");
+      const res = await request(testServer()).post("/api/v1/requests/missing/retry");
       expect(res.status).toBe(404);
     });
 
@@ -2217,7 +2638,7 @@ describe("API Endpoints", () => {
         workerType: "coder-acp-copilot",
         run: { _id: "run-1", attemptNumber: 1, status: "processing" },
       });
-      const res = await request(app).post("/api/v1/requests/req-1/retry");
+      const res = await request(testServer()).post("/api/v1/requests/req-1/retry");
       expect(res.status).toBe(422);
       expect(res.body.error).toContain("expected 'done'");
     });
@@ -2231,7 +2652,7 @@ describe("API Endpoints", () => {
       (mocks.runsCollection.insertOne as any).mockResolvedValue({ insertedId: "run-1" });
       (mocks.collection.updateOne as any).mockResolvedValue({ matchedCount: 1, modifiedCount: 1 });
 
-      const res = await request(app).post("/api/v1/requests/req-1/retry");
+      const res = await request(testServer()).post("/api/v1/requests/req-1/retry");
 
       expect(res.status).toBe(201);
       expect(res.body.attemptNumber).toBe(2);
@@ -2244,6 +2665,7 @@ describe("API Endpoints", () => {
         { _id: "req-1", "run._id": "run-1" },
         expect.objectContaining({
           $set: expect.objectContaining({
+            agentVersion: "1.0.0",
             run: expect.objectContaining({ attemptNumber: 2, status: "pending" }),
           }),
         }),
@@ -2257,7 +2679,7 @@ describe("API Endpoints", () => {
         run: { _id: "run-1", attemptNumber: 1, status: "done", outcome: "succeeded" },
       });
 
-      const res = await request(app).post("/api/v1/requests/req-1/retry");
+      const res = await request(testServer()).post("/api/v1/requests/req-1/retry");
       expect(res.status).toBe(409);
       expect(res.body.error).toContain("force=true");
     });
@@ -2271,7 +2693,7 @@ describe("API Endpoints", () => {
       (mocks.runsCollection.insertOne as any).mockResolvedValue({ insertedId: "run-1" });
       (mocks.collection.updateOne as any).mockResolvedValue({ matchedCount: 1, modifiedCount: 1 });
 
-      const res = await request(app).post("/api/v1/requests/req-1/retry").send({ force: true });
+      const res = await request(testServer()).post("/api/v1/requests/req-1/retry").send({ force: true });
       expect(res.status).toBe(201);
       expect(res.body.attemptNumber).toBe(2);
     });
@@ -2285,7 +2707,7 @@ describe("API Endpoints", () => {
       (mocks.runsCollection.insertOne as any).mockResolvedValue({ insertedId: "run-1" });
       (mocks.collection.updateOne as any).mockResolvedValue({ matchedCount: 0, modifiedCount: 0 });
 
-      const res = await request(app).post("/api/v1/requests/req-1/retry");
+      const res = await request(testServer()).post("/api/v1/requests/req-1/retry");
       expect(res.status).toBe(409);
     });
 
@@ -2296,7 +2718,7 @@ describe("API Endpoints", () => {
         deletedAt: new Date(),
         run: { _id: "run-1", attemptNumber: 1, status: "done" },
       });
-      const res = await request(app).post("/api/v1/requests/req-1/retry");
+      const res = await request(testServer()).post("/api/v1/requests/req-1/retry");
       expect(res.status).toBe(409);
     });
 
@@ -2311,7 +2733,7 @@ describe("API Endpoints", () => {
       (mocks.runsCollection.insertOne as any).mockRejectedValue(dupErr);
       (mocks.collection.updateOne as any).mockResolvedValue({ matchedCount: 1, modifiedCount: 1 });
 
-      const res = await request(app).post("/api/v1/requests/req-1/retry");
+      const res = await request(testServer()).post("/api/v1/requests/req-1/retry");
       expect(res.status).toBe(201);
     });
   });
@@ -2334,7 +2756,7 @@ describe("API Endpoints", () => {
       (mocks.runsCollection.insertOne as any).mockResolvedValue({ insertedId: "run-1" });
       (mocks.collection.updateOne as any).mockResolvedValue({ matchedCount: 1, modifiedCount: 1 });
 
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/requests/bulk-retry")
         .send({ ids: ["req-1", "req-2"] });
 
@@ -2344,10 +2766,16 @@ describe("API Endpoints", () => {
       expect(res.body.results).toHaveLength(2);
       expect(res.body.results.find((r: any) => r.requestId === "req-1").attemptNumber).toBe(2);
       expect(res.body.results.find((r: any) => r.requestId === "req-2").error).toContain("processing");
+      expect(mocks.collection.updateOne).toHaveBeenCalledWith(
+        { _id: "req-1", "run._id": "run-1" },
+        expect.objectContaining({
+          $set: expect.objectContaining({ agentVersion: "1.0.0" }),
+        }),
+      );
     });
 
     it("returns 400 when ids array is empty", async () => {
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/requests/bulk-retry")
         .send({ ids: [] });
       expect(res.status).toBe(400);
@@ -2362,7 +2790,7 @@ describe("API Endpoints", () => {
     it("sets priority on a single request", async () => {
       (mocks.collection.updateOne as any).mockResolvedValue({ matchedCount: 1, modifiedCount: 1 });
 
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/requests/r1/priority")
         .send({ priority: 5 });
       expect(res.status).toBe(200);
@@ -2372,14 +2800,14 @@ describe("API Endpoints", () => {
     it("returns 404 when request not found", async () => {
       (mocks.collection.updateOne as any).mockResolvedValue({ matchedCount: 0, modifiedCount: 0 });
 
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/requests/missing/priority")
         .send({ priority: 3 });
       expect(res.status).toBe(404);
     });
 
     it("returns 400 when priority is not an integer", async () => {
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/requests/r1/priority")
         .send({ priority: 1.5 });
       expect(res.status).toBe(400);
@@ -2390,7 +2818,7 @@ describe("API Endpoints", () => {
     it("sets priority on multiple requests", async () => {
       (mocks.collection.updateMany as any).mockResolvedValue({ matchedCount: 2, modifiedCount: 2 });
 
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/requests/bulk-priority")
         .send({ ids: ["r1", "r2"], priority: 10 });
       expect(res.status).toBe(200);
@@ -2400,7 +2828,7 @@ describe("API Endpoints", () => {
     it("returns skipped count for non-existent ids", async () => {
       (mocks.collection.updateMany as any).mockResolvedValue({ matchedCount: 1, modifiedCount: 1 });
 
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/requests/bulk-priority")
         .send({ ids: ["r1", "missing"], priority: 5 });
       expect(res.status).toBe(200);
@@ -2416,7 +2844,7 @@ describe("API Endpoints", () => {
     it("pauses a pending request", async () => {
       (mocks.collection.updateOne as any).mockResolvedValue({ matchedCount: 1, modifiedCount: 1 });
 
-      const res = await request(app).post("/api/v1/requests/r1/pause");
+      const res = await request(testServer()).post("/api/v1/requests/r1/pause");
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ id: "r1", status: "paused" });
     });
@@ -2425,7 +2853,7 @@ describe("API Endpoints", () => {
       (mocks.collection.updateOne as any).mockResolvedValue({ matchedCount: 0, modifiedCount: 0 });
       (mocks.collection.findOne as any).mockResolvedValue(null);
 
-      const res = await request(app).post("/api/v1/requests/missing/pause");
+      const res = await request(testServer()).post("/api/v1/requests/missing/pause");
       expect(res.status).toBe(404);
     });
 
@@ -2436,7 +2864,7 @@ describe("API Endpoints", () => {
         run: { _id: "run1", status: "processing" },
       });
 
-      const res = await request(app).post("/api/v1/requests/r1/pause");
+      const res = await request(testServer()).post("/api/v1/requests/r1/pause");
       expect(res.status).toBe(409);
       expect(res.body.error).toContain("processing");
     });
@@ -2446,7 +2874,7 @@ describe("API Endpoints", () => {
     it("resumes a paused request", async () => {
       (mocks.collection.updateOne as any).mockResolvedValue({ matchedCount: 1, modifiedCount: 1 });
 
-      const res = await request(app).post("/api/v1/requests/r1/resume");
+      const res = await request(testServer()).post("/api/v1/requests/r1/resume");
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ id: "r1", status: "pending" });
     });
@@ -2455,7 +2883,7 @@ describe("API Endpoints", () => {
       (mocks.collection.updateOne as any).mockResolvedValue({ matchedCount: 0, modifiedCount: 0 });
       (mocks.collection.findOne as any).mockResolvedValue(null);
 
-      const res = await request(app).post("/api/v1/requests/missing/resume");
+      const res = await request(testServer()).post("/api/v1/requests/missing/resume");
       expect(res.status).toBe(404);
     });
 
@@ -2466,7 +2894,7 @@ describe("API Endpoints", () => {
         run: { _id: "run1", status: "pending" },
       });
 
-      const res = await request(app).post("/api/v1/requests/r1/resume");
+      const res = await request(testServer()).post("/api/v1/requests/r1/resume");
       expect(res.status).toBe(409);
       expect(res.body.error).toContain("pending");
     });
@@ -2476,7 +2904,7 @@ describe("API Endpoints", () => {
     it("pauses multiple requests", async () => {
       (mocks.collection.updateMany as any).mockResolvedValue({ matchedCount: 2, modifiedCount: 2 });
 
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/requests/bulk-pause")
         .send({ ids: ["r1", "r2"] });
       expect(res.status).toBe(200);
@@ -2486,7 +2914,7 @@ describe("API Endpoints", () => {
     it("returns skipped count for non-pausable requests", async () => {
       (mocks.collection.updateMany as any).mockResolvedValue({ matchedCount: 1, modifiedCount: 1 });
 
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/requests/bulk-pause")
         .send({ ids: ["r1", "r2", "r3"] });
       expect(res.status).toBe(200);
@@ -2498,7 +2926,7 @@ describe("API Endpoints", () => {
     it("resumes multiple paused requests", async () => {
       (mocks.collection.updateMany as any).mockResolvedValue({ matchedCount: 2, modifiedCount: 2 });
 
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/requests/bulk-resume")
         .send({ ids: ["r1", "r2"] });
       expect(res.status).toBe(200);

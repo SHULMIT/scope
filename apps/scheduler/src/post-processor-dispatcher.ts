@@ -4,6 +4,7 @@
 import { Collection, Db } from "mongodb";
 import { QueueClient } from "@azure/storage-queue";
 import type { RequestDocument } from "shared";
+import { trackMetric } from "telemetry";
 
 /**
  * PostProcessorDispatcher — detects completed runs needing post-processing
@@ -48,6 +49,8 @@ export class PostProcessorDispatcher {
   private async dispatch(): Promise<void> {
     if (this.dispatching) return;
     this.dispatching = true;
+    const cycleStart = Date.now();
+    let dispatched = 0;
     try {
       const targetVersion = await this.getTargetVersion();
       if (targetVersion <= 0) return; // No version registered yet
@@ -84,6 +87,7 @@ export class PostProcessorDispatcher {
 
         try {
           await this.queueClient.sendMessage(message);
+          dispatched++;
         } catch (err) {
           // Roll back status so the doc is picked up on next poll cycle
           await this.collection.updateOne(
@@ -99,6 +103,10 @@ export class PostProcessorDispatcher {
       console.error("[PostProcessorDispatcher] Error during dispatch:", err);
     } finally {
       this.dispatching = false;
+      trackMetric({ name: "scheduler.pp_dispatch_cycle_ms", value: Date.now() - cycleStart, properties: { service: "scheduler" } });
+      if (dispatched > 0) {
+        trackMetric({ name: "scheduler.pp_requests_dispatched", value: dispatched, properties: { service: "scheduler" } });
+      }
     }
   }
 

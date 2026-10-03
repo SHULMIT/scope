@@ -62,6 +62,12 @@ The decorator is equivalent to wrapping the method body with `withRetry` but kee
 
 Returns `true` if the error message contains `"TooManyRequests"` or `"Request rate is large"` -- the standard CosmosDB 429 throttling patterns.
 
+### `isRetryableJudgeError(error): boolean`
+
+Lives in `packages/shared/src/judge/judge-client.ts` and gates retries of the worker→judge `evaluate()` call. It retries transient judge-side `5xx` `JudgeInfrastructureError`s (but never a version mismatch) and transport-level network failures.
+
+> **Undici gotcha:** when `fetch()` fails at the transport layer, undici throws `TypeError: fetch failed` where `error.message` is literally just `"fetch failed"` and the real reason (`ECONNRESET`, `socket hang up`, etc.) lives in **`error.cause`** (its `.message` and/or `.code`). Predicates that only inspect `error.message` will never see these and won't retry. `isRetryableJudgeError` therefore matches `"fetch failed"` explicitly and folds `error.cause`'s message and code into the searched string. Apply the same pattern to any predicate that classifies `fetch` errors. See scope #1317.
+
 ## Design guidelines
 
 - **Use the decorator** when retry is a cross-cutting concern on a method and the default `isRetryable` logic applies uniformly to all errors the method might throw.
@@ -89,3 +95,4 @@ Do not enable both, or attempts multiply to `maxRetries × ky.limit`.
 | Post-processor worker | Report trigger after enrichment | `@Retry` decorator |
 | Blob storage | Upload/download retries | `withRetry` function |
 | Queue scheduler | CosmosDB operations | `withRetry` with default `isCosmosDb429` |
+| Judge client | Worker→judge `evaluate()` transport + `5xx` failures | `withRetry` with `isRetryableJudgeError` |

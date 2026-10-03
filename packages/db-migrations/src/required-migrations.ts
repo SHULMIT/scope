@@ -37,4 +37,10 @@ export const REQUIRED_MIGRATIONS: readonly string[] = [
   "022-add-runs-sort-indexes.ts",
   "023-add-runs-search-task-index.ts",
   "024-add-criteria-sort-index.ts",
+  "025-create-projects.ts",
+  "026-isolate-catalogs-per-project.ts",
+  "027-uuid-keys-mcp-profileversions.ts",
+  "028-isolate-mcp-secrets-per-project.ts",
+  "029-create-users-collection.ts",
+  "030-create-resource-indexes.ts",
 ];

@@ -22,6 +22,7 @@ function isSlugDuplicateKeyError(error: unknown): boolean {
 
 /** Input for creating a new codebase entity. */
 export interface CreateCodebaseInput {
+  projectId: string;
   name: string;
   slug?: string;
   description?: string;
@@ -63,8 +64,11 @@ export class CodebaseStore {
   }
 
   /** List codebases, newest first (excludes soft-deleted by default). */
-  async list(opts?: { includeDeleted?: boolean }): Promise<CodebaseDocument[]> {
-    const filter = opts?.includeDeleted ? {} : { deletedAt: { $exists: false } };
+  async list(opts?: { includeDeleted?: boolean; projectId?: string }): Promise<CodebaseDocument[]> {
+    const filter: Record<string, unknown> = opts?.includeDeleted ? {} : { deletedAt: { $exists: false } };
+    if (opts?.projectId) {
+      filter.projectId = opts.projectId;
+    }
     return this.collection.find(filter).sort({ createdAt: -1 }).toArray();
   }
 
@@ -95,6 +99,7 @@ export class CodebaseStore {
       const slug = await this.ensureUniqueSlug(baseSlug);
       const doc: CodebaseDocument = {
         _id: randomUUID(),
+        projectId: input.projectId,
         slug,
         name: input.name,
         ...(input.description ? { description: input.description } : {}),

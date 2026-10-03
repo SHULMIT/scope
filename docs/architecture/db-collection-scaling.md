@@ -13,7 +13,7 @@ covers only the first row.
 
 | Concern              | Owner                                       | Where it lives                                          |
 |----------------------|---------------------------------------------|---------------------------------------------------------|
-| Collection scaling (autoscale `maxThroughput`, reconcile policy, creation/deletion of collection resources) | **ASO via FluxCD**, defined in this doc | `scope-mt-app/deploy/base/mongodb-collections/` + per-env overlays |
+| Collection scaling (autoscale `maxThroughput`, reconcile policy, creation/deletion of collection resources) | **ASO via FluxCD**, defined in this doc | ASO collection manifests + per-env overlays |
 | Indexes (creation, removal, backfills) | **`packages/db-migrations`** — see [`db-migrations.md`](./db-migrations.md) | `scope-mt-app/packages/db-migrations/src/migrations/` |
 | Document shape, query patterns, business semantics | **Application code** — see [`db.md`](./db.md) | `scope-mt-app/packages/*/src/` |
 
@@ -47,23 +47,9 @@ same idle cost as manual provisioning at the floor.
 
 ## Where it's defined
 
-```
-scope-mt-app/
-└── deploy/
-    ├── base/
-    │   └── mongodb-collections/         # one YAML per collection
-    │       ├── kustomization.yaml
-    │       ├── accounts.yaml
-    │       ├── agents.yaml
-    │       ├── …
-    │       ├── requests.yaml            # base maxThroughput = 1000
-    │       └── tokens.yaml
-    └── overlays/
-        ├── integration/
-        │   └── kustomization.yaml       # patches `requests` to 3000
-        └── prod/
-            └── kustomization.yaml       # patches `requests` to 6000
-```
+Each collection has an ASO `MongodbDatabaseCollection` manifest (one YAML per
+collection), with per-environment overlays patching `maxThroughput` (e.g.
+`requests` is 1000 at base, 3000 in integration, 6000 in prod).
 
 Each manifest is an ASO `MongodbDatabaseCollection` resource. ASO watches
 these in-cluster, talks to the Azure ARM API, and reconciles the live
@@ -139,7 +125,7 @@ belongs in **the same ASO manifest that owns scaling** — alongside
 `autoscaleSettings` — under `spec.resource.shardKey`:
 
 ```yaml
-# scope-mt-app/deploy/base/mongodb-collections/<collection>.yaml
+# ASO collection manifest: <collection>
 spec:
   resource:
     id: requests
@@ -173,9 +159,8 @@ partially duplicating what migration 002 declares for that field.
 
 ### Bump throughput on a collection
 
-1. Edit the manifest in `deploy/base/mongodb-collections/<collection>.yaml`
-   (changes both envs) **or** the per-env overlay
-   `deploy/overlays/<env>/kustomization.yaml` (changes one env).
+1. Edit the collection's ASO manifest (changes both envs) **or** its per-env
+   overlay (changes one env).
 2. Commit and open a PR against `main`.
 3. After merge, FluxCD reconciles the manifest, ASO calls Azure ARM, and
    Cosmos updates the live throughput.
@@ -190,9 +175,8 @@ partially duplicating what migration 002 declares for that field.
 
 ### Add a new collection
 
-1. Create `deploy/base/mongodb-collections/<collection>.yaml` using an
-   existing manifest as template.
-2. Add the filename to `deploy/base/mongodb-collections/kustomization.yaml`.
+1. Create a new ASO collection manifest using an existing one as template.
+2. Add the filename to the collection kustomization.
 3. If the K8s metadata name and the Azure collection name differ (e.g.
    leading underscore, hyphen-vs-underscore), set `spec.azureName` to the
    exact Azure name. See `migrations.yaml` (K8s `migrations`,

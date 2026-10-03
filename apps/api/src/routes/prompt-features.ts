@@ -13,6 +13,7 @@ import { apiRoute } from "../openapi/api-route.js";
 import type { PromptFeatureDocument, RouteContext } from "../route-context.js";
 import { extractPromptFeatures, generatePromptFeaturePrompt, isLlmAvailable as isPromptFeatureLlmAvailable } from "../prompt-feature-llm.js";
 import { isInferenceError } from "../llm-token.js";
+import { ProjectIdQuerySchema, OptionalProjectIdQuerySchema, getQueryProjectId, getOptionalQueryProjectId } from "../utils/project-scope.js";
 
 export function registerPromptFeaturesRoutes(ctx: RouteContext): void {
 
@@ -24,6 +25,7 @@ apiRoute(ctx.app, ctx.registry, {
   path: "/api/v1/prompt-features/generate-prompt",
   tags: ["Prompt Features"],
   summary: "Generate prompt feature from behavior",
+  query: OptionalProjectIdQuerySchema,
   body: z.object({
     behavior: z.string(),
     currentId: z.string().optional(),
@@ -45,8 +47,9 @@ apiRoute(ctx.app, ctx.registry, {
       return;
     }
 
+    const genProjectId = getOptionalQueryProjectId(req);
     const allFeatures = await ctx.promptFeatureCollection
-      .find({ deletedAt: { $exists: false } })
+      .find({ ...(genProjectId ? { projectId: genProjectId } : {}), deletedAt: { $exists: false } })
       .project({ id: 1, prompt: 1, _id: 0 })
       .toArray();
 
@@ -80,6 +83,7 @@ apiRoute(ctx.app, ctx.registry, {
   path: "/api/v1/prompt-features/seed",
   tags: ["Prompt Features"],
   summary: "Seed prompt features in bulk",
+  query: ProjectIdQuerySchema,
   body: z.object({
     features: z.array(CreatePromptFeatureInputSchema),
   }),
@@ -88,6 +92,7 @@ apiRoute(ctx.app, ctx.registry, {
     errors: z.array(z.string()),
   }),
   handler: async (req, res) => {
+    const projectId = getQueryProjectId(req);
     const { features } = req.body;
 
     let seeded = 0;
@@ -105,9 +110,10 @@ apiRoute(ctx.app, ctx.registry, {
       }
       try {
         await ctx.promptFeatureCollection.updateOne(
-          { id: trimmedId },
+          { projectId, id: trimmedId },
           {
             $setOnInsert: {
+              projectId,
               id: trimmedId,
               prompt: config.prompt.trim(),
               ...(config.type ? { type: config.type } : {}),
@@ -132,6 +138,7 @@ apiRoute(ctx.app, ctx.registry, {
   path: "/api/v1/prompt-features/extract-from-text",
   tags: ["Prompt Features"],
   summary: "Extract features from text",
+  query: OptionalProjectIdQuerySchema,
   body: z.object({
     text: z.string(),
     model: z.string().optional(),
@@ -160,13 +167,14 @@ apiRoute(ctx.app, ctx.registry, {
 
     // Scope candidate features to the requested type (default = select,
     // including legacy features with no `type`).
+    const extractProjectId = getOptionalQueryProjectId(req);
     const promptType = type ?? "select";
     const typeFilter: Record<string, unknown> =
       promptType === "select"
         ? { $or: [{ type: "select" }, { type: { $exists: false } }] }
         : { type: promptType };
     const allFeatures = await ctx.promptFeatureCollection
-      .find({ deletedAt: { $exists: false }, ...typeFilter })
+      .find({ ...(extractProjectId ? { projectId: extractProjectId } : {}), deletedAt: { $exists: false }, ...typeFilter })
       .toArray();
 
     const featureConfigs = allFeatures.map(f => ({ id: f.id, prompt: f.prompt }));
@@ -194,12 +202,12 @@ apiRoute(ctx.app, ctx.registry, {
   path: "/api/v1/prompt-features",
   tags: ["Prompt Features"],
   summary: "List features",
-  query: z.object({ q: z.string().optional(), type: z.enum(["select", "agents.md"]).optional() }),
+  query: z.object({ q: z.string().optional(), type: z.enum(["select", "agents.md"]).optional() }).merge(ProjectIdQuerySchema),
   response: z.array(PromptFeatureResponseSchema),
   handler: async (req, res) => {
     const q = req.query.q;
     const type = req.query.type;
-    const filter: Record<string, unknown> = { deletedAt: { $exists: false } };
+    const filter: Record<string, unknown> = { projectId: getQueryProjectId(req), deletedAt: { $exists: false } };
     if (type) {
       // Absent `type` is treated as 'select' for backward compatibility.
       filter.$and = [
@@ -232,13 +240,15 @@ apiRoute(ctx.app, ctx.registry, {
   tags: ["Prompt Features"],
   summary: "Get feature",
   params: z.object({ id: z.string() }),
+  query: ProjectIdQuerySchema,
   response: PromptFeatureResponseSchema,
   errorResponses: {
     404: { description: "Feature not found" },
   },
   handler: async (req, res) => {
     const { id } = req.params;
-    const feature = await ctx.promptFeatureCollection.findOne({ id, deletedAt: { $exists: false } });
+    const projectId = getQueryProjectId(req);
+    const feature = await ctx.promptFeatureCollection.findOne({ projectId, id, deletedAt: { $exists: false } });
     if (!feature) {
       res.status(404).json({ error: `Prompt feature '${id}' not found` });
       return;
@@ -255,6 +265,7 @@ apiRoute(ctx.app, ctx.registry, {
   tags: ["Prompt Features"],
   summary: "Create feature",
   body: CreatePromptFeatureInputSchema,
+  query: ProjectIdQuerySchema,
   response: PromptFeatureResponseSchema,
   successStatus: 201,
   errorResponses: {
@@ -263,6 +274,7 @@ apiRoute(ctx.app, ctx.registry, {
   },
   handler: async (req, res) => {
     const { id, prompt, type } = req.body;
+    const projectId = getQueryProjectId(req);
 
     if (!id || typeof id !== "string") {
       res.status(400).json({ error: "id is required and must be a string" });
@@ -277,13 +289,14 @@ apiRoute(ctx.app, ctx.registry, {
       return;
     }
 
-    const existing = await ctx.promptFeatureCollection.findOne({ id, deletedAt: { $exists: false } });
+    const existing = await ctx.promptFeatureCollection.findOne({ projectId, id, deletedAt: { $exists: false } });
     if (existing) {
       res.status(409).json({ error: `Prompt feature '${id}' already exists` });
       return;
     }
 
     const doc: PromptFeatureDocument = {
+      projectId,
       id,
       prompt: prompt.trim(),
       ...(type ? { type } : {}),
@@ -302,6 +315,7 @@ apiRoute(ctx.app, ctx.registry, {
   tags: ["Prompt Features"],
   summary: "Update feature",
   params: z.object({ id: z.string() }),
+  query: ProjectIdQuerySchema,
   body: UpdatePromptFeatureInputSchema,
   response: PromptFeatureResponseSchema,
   errorResponses: {
@@ -311,8 +325,10 @@ apiRoute(ctx.app, ctx.registry, {
   handler: async (req, res) => {
     const { id } = req.params;
     const { prompt } = req.body;
+    const projectId = getQueryProjectId(req);
+    const scope = { projectId };
 
-    const existing = await ctx.promptFeatureCollection.findOne({ id, deletedAt: { $exists: false } });
+    const existing = await ctx.promptFeatureCollection.findOne({ ...scope, id, deletedAt: { $exists: false } });
     if (!existing) {
       res.status(404).json({ error: `Prompt feature '${id}' not found` });
       return;
@@ -328,11 +344,11 @@ apiRoute(ctx.app, ctx.registry, {
     }
 
     await ctx.promptFeatureCollection.updateOne(
-      { id, deletedAt: { $exists: false } },
+      { ...scope, id, deletedAt: { $exists: false } },
       { $set: update }
     );
 
-    const updated = await ctx.promptFeatureCollection.findOne({ id, deletedAt: { $exists: false } });
+    const updated = await ctx.promptFeatureCollection.findOne({ ...scope, id, deletedAt: { $exists: false } });
     res.json(updated);
   },
 });
@@ -344,21 +360,24 @@ apiRoute(ctx.app, ctx.registry, {
   tags: ["Prompt Features"],
   summary: "Soft-delete feature",
   params: z.object({ id: z.string() }),
+  query: ProjectIdQuerySchema,
   response: z.object({ id: z.string(), deleted: z.boolean() }),
   errorResponses: {
     404: { description: "Feature not found" },
   },
   handler: async (req, res) => {
     const { id } = req.params;
+    const projectId = getQueryProjectId(req);
+    const scope = { projectId };
 
-    const existing = await ctx.promptFeatureCollection.findOne({ id, deletedAt: { $exists: false } });
+    const existing = await ctx.promptFeatureCollection.findOne({ ...scope, id, deletedAt: { $exists: false } });
     if (!existing) {
       res.status(404).json({ error: `Prompt feature '${id}' not found` });
       return;
     }
 
     await ctx.promptFeatureCollection.updateOne(
-      { id, deletedAt: { $exists: false } },
+      { ...scope, id, deletedAt: { $exists: false } },
       { $set: { deletedAt: new Date() } }
     );
 

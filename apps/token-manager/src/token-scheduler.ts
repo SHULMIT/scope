@@ -3,6 +3,7 @@
 
 import { Collection } from "mongodb";
 import { KeyDocument, KeyType, KeyValidationResult } from "shared";
+import { trackMetric } from "telemetry";
 
 export interface TokenSchedulerDeps {
   collection: Collection<KeyDocument>;
@@ -32,6 +33,9 @@ export function startTokenScheduler(
   const intervalMs = deps.intervalMs ?? 300_000; // 5 minutes default
 
   const runValidation = async () => {
+    const cycleStart = Date.now();
+    let validated = 0;
+    let invalidated = 0;
     try {
       const tokens = await deps.collection
         .find({ enabled: true, deletedAt: { $exists: false } })
@@ -63,7 +67,9 @@ export function startTokenScheduler(
             }
           );
 
+          validated++;
           if (result.status !== "valid") {
+            invalidated++;
             console.warn(
               `[token-scheduler] Token ${token._id} (${token.type}): validation status = ${result.status}${result.error ? ` — ${result.error}` : ""}`
             );
@@ -106,6 +112,14 @@ export function startTokenScheduler(
         "[token-scheduler] Validation tick failed:",
         err instanceof Error ? err.message : err
       );
+    } finally {
+      trackMetric({ name: "token_manager.validation_cycle_ms", value: Date.now() - cycleStart, properties: { service: "token-manager" } });
+      if (validated > 0) {
+        trackMetric({ name: "token_manager.tokens_validated", value: validated, properties: { service: "token-manager" } });
+      }
+      if (invalidated > 0) {
+        trackMetric({ name: "token_manager.tokens_invalidated", value: invalidated, properties: { service: "token-manager" } });
+      }
     }
   };
 

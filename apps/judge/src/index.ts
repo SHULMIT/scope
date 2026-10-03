@@ -7,11 +7,15 @@ import { evaluateWorkspace } from "./judge-agent.js";
 import { verifyCopilotProtocol } from "./protocol-check.js";
 import { resolveCurrentIteration, mapIterationToolCallUrls } from "./tool-call-history.js";
 import { BlobStorage, RedisLogPublisher } from "shared";
+import { initTelemetry, trackMetric, trackEvent } from "telemetry";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
 dotenv.config();
+
+// Initialize telemetry before any other setup
+initTelemetry("scope-judge");
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
@@ -53,7 +57,7 @@ app.post(
     const startTime = Date.now();
 
     try {
-      const { snapshotUrl, criteria, conversationHistory, personaInstructions, requestId, gate, toolCallsUrl, iteration, currentAgentResponse } = req.body;
+      const { snapshotUrl, criteria, conversationHistory, personaInstructions, requestId, gate, toolCallsUrl, iteration, projectId, currentAgentResponse } = req.body;
 
       // Validate required fields
       if (!snapshotUrl || typeof snapshotUrl !== "string") {
@@ -87,11 +91,28 @@ app.post(
         `[judge] Evaluating snapshot: ${snapshotUrl} (${criteria.length} criteria, ${conversationHistory?.length || 0} prior turns)`
       );
 
+      trackEvent({
+        name: "judge.evaluation_started",
+        properties: {
+          requestId: requestId || "unknown",
+          criteriaCount: String(criteria.length),
+          gate: gate || "select",
+        },
+      });
+
       // Download and extract workspace snapshot to temp directory
       const workDir = mkdtempSync(join(tmpdir(), "judge-workspace-"));
 
       try {
+        const downloadStart = Date.now();
         await blobStorage.downloadAndExtractSnapshot(snapshotUrl, workDir);
+        const downloadMs = Date.now() - downloadStart;
+
+        trackMetric({
+          name: "judge.blob_download_ms",
+          value: downloadMs,
+          properties: { requestId: requestId || "unknown" },
+        });
 
         console.log(`[judge] Snapshot extracted to ${workDir}`);
 
@@ -156,6 +177,7 @@ app.post(
           onProgress,
           gate,
           iterationToolCalls,
+          projectId,
           currentAgentResponse,
         });
 
@@ -163,6 +185,27 @@ app.post(
         console.log(
           `[judge] Evaluation complete in ${elapsed}ms: passed=${result.passed}`
         );
+
+        trackMetric({
+          name: "judge.evaluation_duration_ms",
+          value: elapsed,
+          properties: { requestId: requestId || "unknown", gate: gate || "select" },
+        });
+
+        trackMetric({
+          name: "judge.criteria_count",
+          value: criteria.length,
+          properties: { requestId: requestId || "unknown" },
+        });
+
+        trackEvent({
+          name: "judge.evaluation_completed",
+          properties: {
+            requestId: requestId || "unknown",
+            passed: String(result.passed),
+            criteriaCount: String(criteria.length),
+          },
+        });
 
         res.json(result);
       } finally {

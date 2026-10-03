@@ -28,6 +28,7 @@ export const UpdateExtensionInputSchema = z
 export const ExtensionResponseSchema = z
   .object({
     _id: z.string(),
+    slug: z.string(),
     publisher: z.string(),
     name: z.string(),
     description: z.string().optional(),
@@ -35,6 +36,7 @@ export const ExtensionResponseSchema = z
     createdAt: z.coerce.date(),
     updatedAt: z.coerce.date().optional(),
     deletedAt: z.coerce.date().optional(),
+    projectId: z.string(),
   })
   .openapi("ExtensionResponse");
 

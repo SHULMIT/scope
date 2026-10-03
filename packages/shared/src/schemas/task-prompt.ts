@@ -20,6 +20,7 @@ export const CreateTaskPromptInputSchema = z
 export const TaskPromptResponseSchema = z
   .object({
     _id: z.string(),
+    keyId: z.string(),
     type: PromptTypeSchema.optional(),
     // Present for inline-stored bodies; absent when the body lives in blob
     // storage (see `contentBlobUrl`). Use the `/content` endpoint to always
@@ -30,6 +31,7 @@ export const TaskPromptResponseSchema = z
     featuresExtractedAt: z.coerce.date().optional(),
     createdAt: z.coerce.date(),
     deletedAt: z.coerce.date().optional(),
+    projectId: z.string(),
   })
   .openapi("TaskPromptResponse");
 

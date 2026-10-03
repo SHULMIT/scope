@@ -6,7 +6,8 @@ import { configureHelp } from "../utils/helpFormatter.js";
 import { dimTimestamp, errorText, successText, label, value, warnBanner } from "../utils/style.js";
 import { formatData, isMachineReadable } from "../utils/formatters.js";
 import type { OutputFormat, DisplayField } from "../utils/types.js";
-import { withOutputOption, getDefaultApiUrl } from "../utils/shared.js";
+import { withOutputOption, withProjectOption, getDefaultApiUrl } from "../utils/shared.js";
+import { requireProjectId } from "../utils/config.js";
 import { apiFetch } from "../utils/api-client.js";
 import { parseEnvPairs, parseHeaderPairs } from "../utils/parsers.js";
 
@@ -31,16 +32,17 @@ const mcpServer = mcp
 
 configureHelp(mcpServer);
 
-withOutputOption(
+withProjectOption(withOutputOption(
 mcpServer
   .command("list")
   .description("List all MCP servers")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
-)
+))
   .action(async (options) => {
     const format = (options.output || 'table') as OutputFormat;
+    const projectId = requireProjectId(options.project);
     try {
-      const response = await apiFetch(options.url, `/mcp/servers`);
+      const response = await apiFetch(options.url, `/mcp/servers`, { projectId });
       if (!response.ok) {
         const error = await response.json();
         console.error(errorText("Error:"), error.error || JSON.stringify(error));
@@ -68,17 +70,18 @@ mcpServer
     }
   });
 
-withOutputOption(
+withProjectOption(withOutputOption(
 mcpServer
   .command("get")
   .description("Get details of an MCP server")
   .requiredOption("-i, --id <id>", "MCP server slug")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
-)
+))
   .action(async (options) => {
     const format = (options.output || 'table') as OutputFormat;
     try {
-      const response = await apiFetch(options.url, `/mcp/servers/${encodeURIComponent(options.id)}`);
+      const projectId = requireProjectId(options.project);
+      const response = await apiFetch(options.url, `/mcp/servers/${encodeURIComponent(options.id)}`, { projectId });
       if (!response.ok) {
         const error = await response.json();
         console.error(errorText("Error:"), error.error || JSON.stringify(error));
@@ -145,8 +148,10 @@ mcpServer
   .option("--description <desc>", "Description")
   .option("--header <header...>", "Headers in name:value format (repeatable)")
   .option("-u, --api-url <url>", "API base URL", getDefaultApiUrl())
+  .option("--project <id>", "Project ID for scoped operations (overrides SCOPE_PROJECT and the saved selection)")
   .action(async (options) => {
     try {
+      const projectId = requireProjectId(options.project);
       const isStdio = options.type === "stdio";
 
       if (isStdio && !options.command) {
@@ -180,6 +185,7 @@ mcpServer
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        projectId,
       });
       if (!response.ok) {
         const error = await response.json();
@@ -194,6 +200,7 @@ mcpServer
     }
   });
 
+withProjectOption(
 mcpServer
   .command("update")
   .description("Update an MCP server")
@@ -207,8 +214,10 @@ mcpServer
   .option("--description <desc>", "Description")
   .option("--header <header...>", "Headers in name:value format (replaces all headers)")
   .option("-u, --api-url <url>", "API base URL", getDefaultApiUrl())
+)
   .action(async (options) => {
     try {
+      const projectId = requireProjectId(options.project);
       const body: Record<string, unknown> = {};
       if (options.name) body.name = options.name;
       if (options.type) body.type = options.type;
@@ -226,6 +235,7 @@ mcpServer
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        projectId,
       });
       if (!response.ok) {
         const error = await response.json();
@@ -240,15 +250,19 @@ mcpServer
     }
   });
 
+withProjectOption(
 mcpServer
   .command("delete")
   .description("Delete an MCP server (soft-delete)")
   .requiredOption("-i, --id <id>", "MCP server slug")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
+)
   .action(async (options) => {
     try {
+      const projectId = requireProjectId(options.project);
       const response = await apiFetch(options.url, `/mcp/servers/${encodeURIComponent(options.id)}`, {
         method: "DELETE",
+        projectId,
       });
       if (!response.ok) {
         const error = await response.json();

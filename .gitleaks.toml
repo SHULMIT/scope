@@ -1,0 +1,75 @@
+# gitleaks configuration for growth-ecosystems/scope-core
+#
+# Extends the maintained gitleaks default ruleset and allowlists a set of
+# VERIFIED-BENIGN false positives so the CI scan runs clean WITHOUT weakening
+# detection of real secrets.
+#
+# Background: an exhaustive full-history cross-check (gitleaks v8.30.1 over
+# `git . --log-opts="--all"`) surfaced 181 findings — ALL false positives, every
+# single one from gitleaks' high-noise `generic-api-key` catch-all rule. The
+# repository contains zero real secrets. Every allowlist entry below is therefore
+# scoped with `targetRules = ["generic-api-key"]`, so the dedicated high-signal
+# rules (github-pat, aws-access-token, private-key, etc.) still fire normally.
+#
+# Reference: https://github.com/gitleaks/gitleaks#configuration
+
+title = "scope-core gitleaks config"
+
+[extend]
+# Start from the built-in default rules, then layer our allowlists on top.
+useDefault = true
+
+# ---------------------------------------------------------------------------
+# Allowlist 1 — public, well-known dev/emulator keys, image tags and spec
+# examples. These are published constants, not credentials, and are safe to
+# embed verbatim. Matched against the full match string (`regexTarget = "match"`)
+# because some appear as `name:<value>` (e.g. docker image tags).
+# ---------------------------------------------------------------------------
+[[allowlists]]
+description = "Public well-known dev keys, image tags and spec examples (generic-api-key false positives)"
+targetRules = ["generic-api-key"]
+regexTarget = "match"
+regexes = [
+  # Kustomize / docker image tags of the form <name>:<UTC-timestamp>-<git-sha>,
+  # e.g. acrscopev2int.azurecr.io/scoped/api:20260702T215517Z-ba2f4d8 .
+  # gitleaks misreads `api:<tag>` / `token-manager:<tag>` as `key:<secret>`.
+  # Covers docker-compose.yml and scripts/**.
+  '''\d{8}T\d{6}Z-[0-9a-f]{7,40}''',
+
+  # Azurite (Azure Storage Emulator) well-known account key — publicly
+  # documented by Microsoft. Appears in docker-compose.yml, .env.example,
+  # and scripts/**.
+  '''Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==''',
+
+  # Azure Cosmos DB Emulator well-known key — publicly documented by Microsoft.
+  # (History-only, plus test fixtures and docs.)
+  '''C2y6yDjf5/R\+ob0N8A7Cgv30VRDJIWEHLM\+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==''',
+
+  # Sec-WebSocket-Key example from RFC 6455 §1.3 — base64 of the literal string
+  # "the sample nonce". Used in apps/gateway/src/proxy/websocket.rs.
+  '''dGhlIHNhbXBsZSBub25jZQ==''',
+]
+
+# ---------------------------------------------------------------------------
+# Allowlist 2 — test fixtures. Mock / sample values live in *.test.ts and
+# *.integration.test.ts (e.g. TOTP seeds, fake service URLs). Scoped to
+# `generic-api-key` ONLY, so a genuinely real credential committed inside a
+# test file would STILL be caught by the high-signal rules.
+# ---------------------------------------------------------------------------
+[[allowlists]]
+description = "Test/integration fixtures (generic-api-key false positives only)"
+targetRules = ["generic-api-key"]
+paths = [
+  '''.*\.test\.ts$''',
+  '''.*\.integration\.test\.ts$''',
+]
+
+# The harvested OpenAPI fingerprint is a content hash, not an API credential.
+# Match only this verified digest in the dataset manifest, including history.
+[[allowlists]]
+description = "Static prompt dataset OpenAPI SHA-256 fingerprint"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^evaluations/static-prompts/datasets/manifest\.json$''']
+regexes = ['''^4f6776ac4602e279c8723acd9a6cb22fa504c95538ab9491e0b5acab267c6a6b$''']

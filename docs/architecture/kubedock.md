@@ -40,25 +40,6 @@ Kubedock gives coding agents the ability to run Docker commands (build, run, exe
 
 Kubedock is deployed as a **Kustomize Component** that overlays opt into per environment.
 
-### File structure
-
-```
-deploy/
-  components/
-    kubedock/
-      kustomization.yaml           # kind: Component declaration
-      kubedock-sidecar-patch.yaml  # Strategic merge patch for both ACP workers
-      kubedock-rbac.yaml           # ServiceAccount, Role, RoleBinding
-      kubedock-config.yaml         # Pod template ConfigMap
-  base/
-    workers/                       # No kubedock resources here (clean base)
-  overlays/
-    integration/
-      kustomization.yaml           # components: [../../components/kubedock]  ← ENABLED
-    prod/
-      kustomization.yaml           # (no component reference)                ← DISABLED
-```
-
 ### Enabling in an environment
 
 Add to the overlay's `kustomization.yaml`:
@@ -124,12 +105,13 @@ This prevents accidental container cleanup against a real Docker daemon (e.g., i
 
 ### Subprocess Environment
 
-Workers pass `DOCKER_HOST` to agent subprocesses via `buildSubprocessEnv()`:
+ACP workers pass `DOCKER_HOST` to agent subprocesses via `buildSubprocessEnv()`:
 
 ```typescript
 // In buildSubprocessEnv() — conditional passthrough
 ...(process.env.DOCKER_HOST ? { DOCKER_HOST: process.env.DOCKER_HOST } : {})
 ```
+
 
 ## Kubedock Configuration
 

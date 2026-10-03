@@ -14,10 +14,15 @@ export type ExtensionOrigin = "marketplace" | "manual";
  * Extension document stored in MongoDB (`extensions` collection).
  *
  * A mutable reference to a VS Code extension.
- * The `_id` is the extension identifier (e.g. "ms-python.python").
+ * The human slug is the extension identifier `{publisher}.{name}` (e.g. "ms-python.python"),
+ * exposed as the public `id`. It is unique **per project**, not globally — the same slug may exist
+ * in multiple projects. New rows use a random UUID `_id` and carry the slug in `slug`; legacy rows
+ * (pre-migration 026) still have `_id === slug`, so lookups accept either.
  */
 export interface ExtensionDocument {
-  _id: string;                    // Extension ID: "{publisher}.{name}" (e.g. "ms-python.python")
+  _id: string;                    // Random UUID for new rows; legacy rows: slug "{publisher}.{name}"
+  slug: string;                   // Extension ID "{publisher}.{name}" — unique per project, exposed as public `id`
+  projectId: string;              // FK → ProjectDocument._id (immutable scope)
   publisher: string;              // Publisher name (e.g. "ms-python")
   name: string;                   // Human-readable display name (e.g. "Python")
   description?: string;           // From marketplace

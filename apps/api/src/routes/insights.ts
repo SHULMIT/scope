@@ -11,6 +11,7 @@ import {
 } from "shared";
 import { apiRoute } from "../openapi/api-route.js";
 import type { InsightDocument, RouteContext } from "../route-context.js";
+import { ProjectIdQuerySchema, getQueryProjectId, deriveProjectIdFromParent } from "../utils/project-scope.js";
 
 export function registerInsightsRoutes(ctx: RouteContext): void {
 
@@ -27,12 +28,12 @@ apiRoute(ctx.app, ctx.registry, {
   query: z.object({
     q: z.string().optional(),
     blocked: z.string().optional(),
-  }),
+  }).merge(ProjectIdQuerySchema),
   response: z.array(InsightResponseSchema),
   handler: async (req, res, next) => {
     try {
       const { q, blocked } = req.query;
-      const filter: Record<string, unknown> = { deletedAt: { $exists: false } };
+      const filter: Record<string, unknown> = { projectId: getQueryProjectId(req), deletedAt: { $exists: false } };
 
       if (blocked !== undefined) {
         filter.blocked = blocked === "true";
@@ -70,7 +71,7 @@ apiRoute(ctx.app, ctx.registry, {
   query: z.object({
     q: z.string(),
     blocked: z.string().optional(),
-  }),
+  }).merge(ProjectIdQuerySchema),
   response: z.array(InsightResponseSchema),
   handler: async (req, res, next) => {
     try {
@@ -81,7 +82,7 @@ apiRoute(ctx.app, ctx.registry, {
         return;
       }
 
-      const filter: Record<string, unknown> = { deletedAt: { $exists: false } };
+      const filter: Record<string, unknown> = { projectId: getQueryProjectId(req), deletedAt: { $exists: false } };
 
       if (blocked !== undefined) {
         filter.blocked = blocked === "true";
@@ -165,8 +166,14 @@ apiRoute(ctx.app, ctx.registry, {
       }
 
       const now = new Date();
+      // Agent-authored insights derive their project from the source report;
+      // user-authored insights take it from the required ?projectId= query param.
+      const projectId = sourceReportId
+        ? await deriveProjectIdFromParent(ctx.reportCollection, sourceReportId, { parentLabel: "report" })
+        : getQueryProjectId(req);
       const doc: InsightDocument = {
         _id: uuidv4(),
+        projectId,
         title: title.trim(),
         description: description.trim(),
         category: category?.trim() || undefined,

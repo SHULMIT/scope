@@ -37,11 +37,12 @@ export class PromptFeatureStore {
 
   /** Create a new prompt feature. Validates uniqueness. */
   async create(input: {
+    projectId: string;
     id: string;
     prompt: string;
     type?: PromptType;
   }): Promise<PromptFeatureDocument> {
-    const { id, prompt, type } = input;
+    const { projectId, id, prompt, type } = input;
 
     // Validate ID format
     if (!/^[a-z0-9_-]+$/.test(id)) {
@@ -57,6 +58,7 @@ export class PromptFeatureStore {
     }
 
     const doc: PromptFeatureDocument = {
+      projectId,
       id,
       prompt: prompt.trim(),
       ...(type ? { type } : {}),

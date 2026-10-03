@@ -63,38 +63,38 @@ describe("PromptFeatureStore type support", () => {
   });
 
   it("create persists the type field when provided", async () => {
-    const doc = await store.create({ id: "agents_terse", prompt: "Be terse", type: "agents.md" });
+    const doc = await store.create({ projectId: "proj-test", id: "agents_terse", prompt: "Be terse", type: "agents.md" });
     expect(doc.type).toBe("agents.md");
     expect(collection._docs[0].type).toBe("agents.md");
   });
 
   it("create omits type when not provided (backward compatible)", async () => {
-    const doc = await store.create({ id: "task_feat", prompt: "A task feature" });
+    const doc = await store.create({ projectId: "proj-test", id: "task_feat", prompt: "A task feature" });
     expect(doc.type).toBeUndefined();
     expect("type" in collection._docs[0]).toBe(false);
   });
 
   it("getAll({type: 'agents.md'}) returns only agents.md features", async () => {
-    await store.create({ id: "task_a", prompt: "p", type: "select" });
-    await store.create({ id: "legacy", prompt: "p" }); // no type → select
-    await store.create({ id: "agents_b", prompt: "p", type: "agents.md" });
+    await store.create({ projectId: "proj-test", id: "task_a", prompt: "p", type: "select" });
+    await store.create({ projectId: "proj-test", id: "legacy", prompt: "p" }); // no type → select
+    await store.create({ projectId: "proj-test", id: "agents_b", prompt: "p", type: "agents.md" });
 
     const result = await store.getAll({ type: "agents.md" });
     expect(result.map((f) => f.id)).toEqual(["agents_b"]);
   });
 
   it("getAll({type: 'select'}) includes legacy (untyped) features", async () => {
-    await store.create({ id: "task_a", prompt: "p", type: "select" });
-    await store.create({ id: "legacy", prompt: "p" });
-    await store.create({ id: "agents_b", prompt: "p", type: "agents.md" });
+    await store.create({ projectId: "proj-test", id: "task_a", prompt: "p", type: "select" });
+    await store.create({ projectId: "proj-test", id: "legacy", prompt: "p" });
+    await store.create({ projectId: "proj-test", id: "agents_b", prompt: "p", type: "agents.md" });
 
     const result = await store.getAll({ type: "select" });
     expect(result.map((f) => f.id).sort()).toEqual(["legacy", "task_a"]);
   });
 
   it("getAll() with no filter returns all features", async () => {
-    await store.create({ id: "task_a", prompt: "p" });
-    await store.create({ id: "agents_b", prompt: "p", type: "agents.md" });
+    await store.create({ projectId: "proj-test", id: "task_a", prompt: "p" });
+    await store.create({ projectId: "proj-test", id: "agents_b", prompt: "p", type: "agents.md" });
 
     const result = await store.getAll();
     expect(result).toHaveLength(2);

@@ -33,12 +33,21 @@ export class RestApiCriteriaProvider implements CriteriaProvider {
   private readonly apiUrl: string;
   private readonly maxSize: number;
   private readonly ttlMs: number;
+  private readonly projectId?: string;
 
-  constructor(apiUrl: string, options?: { maxSize?: number; ttlMs?: number }) {
+  constructor(apiUrl: string, options?: { maxSize?: number; ttlMs?: number; projectId?: string }) {
     // Strip trailing slash
     this.apiUrl = apiUrl.replace(/\/+$/, '');
     this.maxSize = options?.maxSize ?? 200;
     this.ttlMs = options?.ttlMs ?? 60_000; // 1 minute
+    this.projectId = options?.projectId;
+  }
+
+  /** Append ?projectId= when this provider is bound to a project (per-project isolation). */
+  private withProject(url: string): string {
+    if (!this.projectId) return url;
+    const sep = url.includes('?') ? '&' : '?';
+    return `${url}${sep}projectId=${encodeURIComponent(this.projectId)}`;
   }
 
   // ---------------------------------------------------------------------------
@@ -54,7 +63,7 @@ export class RestApiCriteriaProvider implements CriteriaProvider {
     }
 
     // 2. Fetch from API
-    const url = `${this.apiUrl}/api/v1/criteria/${encodeURIComponent(id)}`;
+    const url = this.withProject(`${this.apiUrl}/api/v1/criteria/${encodeURIComponent(id)}`);
     const res = await fetch(url);
 
     if (res.status === 404) return undefined;
@@ -76,7 +85,7 @@ export class RestApiCriteriaProvider implements CriteriaProvider {
     }
 
     // 2. Fetch from API
-    const url = `${this.apiUrl}/api/v1/criteria`;
+    const url = this.withProject(`${this.apiUrl}/api/v1/criteria`);
     const res = await fetch(url);
 
     if (!res.ok) {

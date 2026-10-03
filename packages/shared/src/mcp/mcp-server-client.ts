@@ -19,17 +19,17 @@ export class McpServerClient {
 
   /**
    * Resolve an array of MCP server slugs to their full configurations.
-   * Fetches each server from the API and maps to McpServerConfig.
+   * Fetches each server from the API (scoped to the run's project) and maps to McpServerConfig.
    *
    * @throws Error if any slug cannot be resolved (404 or HTTP error)
    */
-  async resolveServers(slugs: string[]): Promise<McpServerConfig[]> {
+  async resolveServers(projectId: string, slugs: string[]): Promise<McpServerConfig[]> {
     if (slugs.length === 0) return [];
 
     const configs: McpServerConfig[] = [];
 
     for (const slug of slugs) {
-      const url = `${this.apiUrl}/api/v1/mcp/servers/${encodeURIComponent(slug)}`;
+      const url = `${this.apiUrl}/api/v1/mcp/servers/${encodeURIComponent(slug)}?projectId=${encodeURIComponent(projectId)}`;
       const res = await fetch(url);
 
       if (res.status === 404) {
@@ -50,12 +50,15 @@ export class McpServerClient {
 /**
  * Map an API response (McpServerDocument) to a McpServerConfig,
  * stripping DB metadata (createdAt, updatedAt, deletedAt).
- * _id (slug) is preserved as the gateway-safe identifier.
+ *
+ * The gateway identity is the human `slug` (used to name the server and prefix
+ * tools as `{slug}__{tool}`), NOT the internal UUID `_id`. Falls back to `_id`
+ * for pre-migration rows whose `_id` is still the slug.
  */
 function mapToMcpServerConfig(data: McpServerDocument): McpServerConfig {
   return {
     type: data.type,
-    slug: data._id,
+    slug: data.slug ?? data._id,
     name: data.name,
     ...(data.url ? { url: data.url } : {}),
     ...(data.command ? { command: data.command } : {}),

@@ -12,17 +12,58 @@ import {
   ExtensionClient,
   parseExtensionSpec,
 } from "shared";
-import type { ProfileDocument, ProfileVersionDocument } from "shared";
+import type { ProfileDocument, ProfileVersionDocument, ResourceBindingSpec } from "shared";
 import { apiRoute } from "../openapi/api-route.js";
 import type { RouteContext } from "../route-context.js";
 import { resolveSkillSpecs } from "../utils/skill-helpers.js";
-import { validateAgentForModel } from "../utils/agent-helpers.js";
+import {
+  requestedAgentCapabilities,
+  validateAgentTarget,
+} from "../utils/agent-helpers.js";
+import { ProjectIdQuerySchema, getQueryProjectId } from "../utils/project-scope.js";
 
 export function registerProfilesRoutes(ctx: RouteContext): void {
 
 // =====================================================================
 // Profiles API
 // =====================================================================
+
+/**
+ * Normalize a stored profile-version doc for API responses.
+ *
+ * After migration 027, `_id` is an internal random UUID and the composite
+ * `"<profileId>@<version>"` lives in `ref`. The API contract keeps surfacing the
+ * composite as `_id` (its historical value and the format stored in
+ * `requests.profileVersionId`), so we mask `_id` back to `ref` on the way out and
+ * never leak the internal UUID. Legacy rows (pre-027) still have `_id === ref`.
+ */
+const versionResponse = <T extends ProfileVersionDocument>(v: T): T => ({
+  ...v,
+  _id: v.ref ?? v._id,
+});
+
+function normalizeResourceBindingSpecs(input: unknown): ResourceBindingSpec[] | undefined {
+  if (!Array.isArray(input) || input.length === 0) return undefined;
+  const specs = input
+    .map((item) => {
+      if (typeof item === "string") {
+        const ref = item.trim();
+        return ref ? { ref } : undefined;
+      }
+      if (item && typeof item === "object" && typeof (item as { ref?: unknown }).ref === "string") {
+        const ref = (item as { ref: string }).ref.trim();
+        if (!ref) return undefined;
+        const params = (item as { params?: unknown }).params;
+        return {
+          ref,
+          ...(params && typeof params === "object" ? { params: params as Record<string, string> } : {}),
+        };
+      }
+      return undefined;
+    })
+    .filter((spec): spec is ResourceBindingSpec => spec !== undefined);
+  return specs.length > 0 ? specs : undefined;
+}
 
 // POST /api/v1/profiles — create a new profile (+ version 1)
 apiRoute(ctx.app, ctx.registry, {
@@ -31,33 +72,40 @@ apiRoute(ctx.app, ctx.registry, {
   tags: ["Profiles"],
   summary: "Create a new profile",
   body: CreateProfileInputSchema,
+  query: ProjectIdQuerySchema,
   response: ProfileWithVersionResponseSchema,
   handler: async (req, res, next) => {
     try {
-      const { name, description, workerType, model, reasoningEffort, agentVersion, mcpServers, skillRevisions, extensions } = req.body;
-
-      // Extensions are only supported by VS Code workers
-      if (extensions && extensions.length > 0 && !workerType.includes("vscode")) {
-        res.status(400).json({ error: `Worker type "${workerType}" does not support VS Code extensions` });
-        return;
-      }
+      const { name, description, workerType, model, reasoningEffort, agentVersion, mcpServers, skillRevisions, resources, extensions } = req.body;
+      const projectId = getQueryProjectId(req);
+      const resourceBindings = normalizeResourceBindingSpecs(resources);
 
       // A profile must be self-sufficient to submit a run, which requires a
       // model. Agents that don't declare any supportedModels can't satisfy
       // that contract, so creating a profile for them is rejected upfront.
-      const agentCheck = await validateAgentForModel(ctx.agentCollection, workerType, model, "profiles");
+      const agentCheck = await validateAgentTarget(ctx.agentCollection, {
+        workerType,
+        requestedVersion: agentVersion,
+        model,
+        requireModel: true,
+        subjectPlural: "profiles",
+        requirements: requestedAgentCapabilities({
+          reasoningEffort,
+          mcpServers,
+          skillRevisions,
+          extensions,
+        }),
+        strictCapabilities: ctx.strictAgentCapabilities,
+      });
       if (!agentCheck.ok) {
-        const payload: Record<string, unknown> = { error: agentCheck.error };
-        if ("supportedModels" in agentCheck && agentCheck.supportedModels) {
-          payload.supportedModels = agentCheck.supportedModels;
-        }
-        res.status(agentCheck.status).json(payload);
+        const { ok: _ok, status, ...payload } = agentCheck;
+        res.status(status).json(payload);
         return;
       }
 
       const now = new Date();
       const profileId = uuidv4();
-      const versionId = `${profileId}@1`;
+      const versionRef = `${profileId}@1`;
 
       // Resolve extension versions (same pattern as run submission)
       let resolvedExtensions: string[] | undefined;
@@ -83,7 +131,7 @@ apiRoute(ctx.app, ctx.registry, {
       // Resolve skill specs to pinned revision refs
       let resolvedSkillRevisions: string[] | undefined;
       if (skillRevisions && skillRevisions.length > 0) {
-        const result = await resolveSkillSpecs(skillRevisions, ctx);
+        const result = await resolveSkillSpecs(skillRevisions, ctx, projectId);
         if (result.error) {
           res.status(422).json({ error: result.error });
           return;
@@ -93,6 +141,7 @@ apiRoute(ctx.app, ctx.registry, {
 
       const profileDoc: ProfileDocument = {
         _id: profileId,
+        projectId,
         name,
         ...(description ? { description } : {}),
         latestVersion: 1,
@@ -100,15 +149,18 @@ apiRoute(ctx.app, ctx.registry, {
       };
 
       const versionDoc: ProfileVersionDocument = {
-        _id: versionId,
+        _id: uuidv4(),
+        ref: versionRef,
+        projectId,
         profileId,
         version: 1,
         workerType,
-        model,
+        model: agentCheck.model ?? model,
         ...(reasoningEffort ? { reasoningEffort } : {}),
-        ...(agentVersion ? { agentVersion } : {}),
+        agentVersion: agentCheck.agentVersion,
         ...(mcpServers && mcpServers.length > 0 ? { mcpServers } : {}),
         ...(resolvedSkillRevisions && resolvedSkillRevisions.length > 0 ? { skillRevisions: resolvedSkillRevisions } : {}),
+        ...(resourceBindings && resourceBindings.length > 0 ? { resources: resourceBindings } : {}),
         ...(resolvedExtensions && resolvedExtensions.length > 0 ? { extensions: resolvedExtensions } : {}),
         createdAt: now,
       };
@@ -116,7 +168,7 @@ apiRoute(ctx.app, ctx.registry, {
       await ctx.profileCollection.insertOne(profileDoc);
       await ctx.profileVersionCollection.insertOne(versionDoc);
 
-      res.status(201).json({ ...profileDoc, version: versionDoc });
+      res.status(201).json({ ...profileDoc, version: versionResponse(versionDoc) });
     } catch (error) {
       next(error);
     }
@@ -129,11 +181,11 @@ apiRoute(ctx.app, ctx.registry, {
   path: "/api/v1/profiles",
   tags: ["Profiles"],
   summary: "List profiles",
-  query: z.object({ workerType: z.string().optional() }),
+  query: z.object({ workerType: z.string().optional() }).merge(ProjectIdQuerySchema),
   response: z.array(ProfileWithVersionResponseSchema),
   handler: async (req, res, next) => {
     try {
-      const filter: Record<string, unknown> = { deletedAt: { $exists: false } };
+      const filter: Record<string, unknown> = { projectId: getQueryProjectId(req), deletedAt: { $exists: false } };
       const profiles = await ctx.profileCollection.find(filter).sort({ name: 1 }).toArray();
 
       const result = await Promise.all(
@@ -141,7 +193,7 @@ apiRoute(ctx.app, ctx.registry, {
           const latestVersion = await ctx.profileVersionCollection.findOne(
             { profileId: profile._id, version: profile.latestVersion },
           );
-          return { ...profile, version: latestVersion! };
+          return { ...profile, version: versionResponse(latestVersion!) };
         }),
       );
 
@@ -179,7 +231,7 @@ apiRoute(ctx.app, ctx.registry, {
       const latestVersion = await ctx.profileVersionCollection.findOne(
         { profileId: profile._id, version: profile.latestVersion },
       );
-      res.json({ ...profile, version: latestVersion! });
+      res.json({ ...profile, version: versionResponse(latestVersion!) });
     } catch (error) {
       next(error);
     }
@@ -208,7 +260,7 @@ apiRoute(ctx.app, ctx.registry, {
         .find({ profileId: profile._id })
         .sort({ version: -1 })
         .toArray();
-      res.json(versions);
+      res.json(versions.map(versionResponse));
     } catch (error) {
       next(error);
     }
@@ -233,7 +285,7 @@ apiRoute(ctx.app, ctx.registry, {
         res.status(404).json({ error: "Profile version not found" });
         return;
       }
-      res.json(versionDoc);
+      res.json(versionResponse(versionDoc));
     } catch (error) {
       next(error);
     }
@@ -260,29 +312,34 @@ apiRoute(ctx.app, ctx.registry, {
         return;
       }
 
-      const { workerType, model, reasoningEffort, agentVersion, mcpServers, skillRevisions, extensions } = req.body;
-
-      // Extensions are only supported by VS Code workers
-      if (extensions && extensions.length > 0 && !workerType.includes("vscode")) {
-        res.status(400).json({ error: `Worker type "${workerType}" does not support VS Code extensions` });
-        return;
-      }
+      const { workerType, model, reasoningEffort, agentVersion, mcpServers, skillRevisions, resources, extensions } = req.body;
+      const resourceBindings = normalizeResourceBindingSpecs(resources);
 
       // Same self-sufficiency rule as POST /profiles: a profile (and any new
       // version) must carry a model, so reject agents that don't expose any.
-      const agentCheck = await validateAgentForModel(ctx.agentCollection, workerType, model, "profile versions");
+      const agentCheck = await validateAgentTarget(ctx.agentCollection, {
+        workerType,
+        requestedVersion: agentVersion,
+        model,
+        requireModel: true,
+        subjectPlural: "profile versions",
+        requirements: requestedAgentCapabilities({
+          reasoningEffort,
+          mcpServers,
+          skillRevisions,
+          extensions,
+        }),
+        strictCapabilities: ctx.strictAgentCapabilities,
+      });
       if (!agentCheck.ok) {
-        const payload: Record<string, unknown> = { error: agentCheck.error };
-        if ("supportedModels" in agentCheck && agentCheck.supportedModels) {
-          payload.supportedModels = agentCheck.supportedModels;
-        }
-        res.status(agentCheck.status).json(payload);
+        const { ok: _ok, status, ...payload } = agentCheck;
+        res.status(status).json(payload);
         return;
       }
 
       const now = new Date();
       const newVersion = profile.latestVersion + 1;
-      const versionId = `${profile._id}@${newVersion}`;
+      const versionRef = `${profile._id}@${newVersion}`;
 
       // Resolve extension versions
       let resolvedExtensions: string[] | undefined;
@@ -308,7 +365,7 @@ apiRoute(ctx.app, ctx.registry, {
       // Resolve skill specs to pinned revision refs
       let resolvedSkillRevisions: string[] | undefined;
       if (skillRevisions && skillRevisions.length > 0) {
-        const result = await resolveSkillSpecs(skillRevisions, ctx);
+        const result = await resolveSkillSpecs(skillRevisions, ctx, profile.projectId);
         if (result.error) {
           res.status(422).json({ error: result.error });
           return;
@@ -317,15 +374,18 @@ apiRoute(ctx.app, ctx.registry, {
       }
 
       const versionDoc: ProfileVersionDocument = {
-        _id: versionId,
+        _id: uuidv4(),
+        ref: versionRef,
+        projectId: profile.projectId,
         profileId: profile._id,
         version: newVersion,
         workerType,
-        model,
+        model: agentCheck.model ?? model,
         ...(reasoningEffort ? { reasoningEffort } : {}),
-        ...(agentVersion ? { agentVersion } : {}),
+        agentVersion: agentCheck.agentVersion,
         ...(mcpServers && mcpServers.length > 0 ? { mcpServers } : {}),
         ...(resolvedSkillRevisions && resolvedSkillRevisions.length > 0 ? { skillRevisions: resolvedSkillRevisions } : {}),
+        ...(resourceBindings && resourceBindings.length > 0 ? { resources: resourceBindings } : {}),
         ...(resolvedExtensions && resolvedExtensions.length > 0 ? { extensions: resolvedExtensions } : {}),
         createdAt: now,
       };
@@ -336,7 +396,7 @@ apiRoute(ctx.app, ctx.registry, {
         { $set: { latestVersion: newVersion, updatedAt: now } },
       );
 
-      res.status(201).json(versionDoc);
+      res.status(201).json(versionResponse(versionDoc));
     } catch (error) {
       next(error);
     }

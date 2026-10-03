@@ -6,7 +6,8 @@ import { configureHelp } from "../utils/helpFormatter.js";
 import { dimTimestamp, errorText, successText, label, value, warnBanner } from "../utils/style.js";
 import { formatData, isMachineReadable } from "../utils/formatters.js";
 import type { OutputFormat, DisplayField } from "../utils/types.js";
-import { withOutputOption, getDefaultApiUrl } from "../utils/shared.js";
+import { withOutputOption, withProjectOption, getDefaultApiUrl } from "../utils/shared.js";
+import { requireProjectId } from "../utils/config.js";
 import { apiFetch } from "../utils/api-client.js";
 
 export function registerExtensionCommands(program: Command): void {
@@ -21,16 +22,17 @@ const extension = program
 
 configureHelp(extension);
 
-withOutputOption(
+withProjectOption(withOutputOption(
 extension
   .command("list")
   .description("List all imported extensions")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
-)
+))
   .action(async (options) => {
     const format = (options.output || 'table') as OutputFormat;
+    const projectId = requireProjectId(options.project);
     try {
-      const response = await apiFetch(options.url, `/extensions`);
+      const response = await apiFetch(options.url, `/extensions`, { projectId });
       if (!response.ok) {
         const error = await response.json();
         console.error(errorText("Error:"), error.error || JSON.stringify(error));
@@ -58,20 +60,21 @@ extension
     }
   });
 
-withOutputOption(
+withProjectOption(withOutputOption(
 extension
   .command("search")
   .description("Search extensions (internal + VS Code marketplace)")
   .requiredOption("-q, --query <query>", "Search query")
   .option("--limit <number>", "Maximum results", parseInt)
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
-)
+))
   .action(async (options) => {
     const format = (options.output || 'table') as OutputFormat;
+    const projectId = requireProjectId(options.project);
     try {
       const params = new URLSearchParams({ q: options.query });
       if (options.limit) params.set('limit', String(options.limit));
-      const response = await apiFetch(options.url, `/extensions/search?${params}`);
+      const response = await apiFetch(options.url, `/extensions/search?${params}`, { projectId });
       if (!response.ok) {
         const error = await response.json();
         console.error(errorText("Error:"), error.error || JSON.stringify(error));
@@ -99,17 +102,18 @@ extension
     }
   });
 
-withOutputOption(
+withProjectOption(withOutputOption(
 extension
   .command("get")
   .description("Get details of an extension")
   .requiredOption("-i, --id <id>", "Extension ID (e.g. ms-python.python)")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
-)
+))
   .action(async (options) => {
     const format = (options.output || 'table') as OutputFormat;
     try {
-      const response = await apiFetch(options.url, `/extensions/${options.id}`);
+      const projectId = requireProjectId(options.project);
+      const response = await apiFetch(options.url, `/extensions/${options.id}`, { projectId });
       if (!response.ok) {
         const error = await response.json();
         console.error(errorText("Error:"), error.error || JSON.stringify(error));
@@ -153,8 +157,10 @@ extension
   .option("--description <desc>", "Description")
   .option("--origin <origin>", "Origin: marketplace or manual", "manual")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
+  .option("--project <id>", "Project ID for scoped operations (overrides SCOPE_PROJECT and the saved selection)")
   .action(async (options) => {
     try {
+      const projectId = requireProjectId(options.project);
       const publisher = options.publisher || options.id.split('.')[0];
       const body: Record<string, unknown> = {
         _id: options.id,
@@ -168,6 +174,7 @@ extension
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        projectId,
       });
       if (!response.ok) {
         const error = await response.json();
@@ -182,15 +189,19 @@ extension
     }
   });
 
+withProjectOption(
 extension
   .command("delete")
   .description("Delete an extension (soft-delete)")
   .requiredOption("-i, --id <id>", "Extension ID")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
+)
   .action(async (options) => {
     try {
+      const projectId = requireProjectId(options.project);
       const response = await apiFetch(options.url, `/extensions/${options.id}`, {
         method: "DELETE",
+        projectId,
       });
       if (!response.ok) {
         const error = await response.json();

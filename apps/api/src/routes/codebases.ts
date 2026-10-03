@@ -14,6 +14,7 @@ import {
 } from "shared";
 import { apiRoute } from "../openapi/api-route.js";
 import type { RouteContext } from "../route-context.js";
+import { ProjectIdQuerySchema, getQueryProjectId } from "../utils/project-scope.js";
 import {
   createCodebaseArchiveUploader,
   downloadCodebaseArchive,
@@ -67,10 +68,11 @@ export function registerCodebasesRoutes(ctx: RouteContext): void {
     path: "/api/v1/codebases",
     tags: ["Codebases"],
     summary: "List all codebases",
+    query: ProjectIdQuerySchema,
     response: z.array(CodebaseResponseSchema),
-    handler: async (_req, res, next) => {
+    handler: async (req, res, next) => {
       try {
-        const codebases = await ctx.codebaseStore.list();
+        const codebases = await ctx.codebaseStore.list({ projectId: getQueryProjectId(req) });
         res.json(codebases.map((c) => ({ ...c, id: c._id })));
       } catch (error) {
         next(error);
@@ -91,6 +93,7 @@ export function registerCodebasesRoutes(ctx: RouteContext): void {
     tags: ["Codebases"],
     summary: "Create a codebase (archive codebases require the archive file)",
     middleware: [upload.single("archive")],
+    query: ProjectIdQuerySchema,
     response: CodebaseResponseSchema,
     rawResponse: true,
     successStatus: 201,
@@ -120,6 +123,7 @@ export function registerCodebasesRoutes(ctx: RouteContext): void {
         }
 
         const codebase = await ctx.codebaseStore.create({
+          projectId: getQueryProjectId(req),
           name,
           ...(slug ? { slug } : {}),
           ...(description ? { description } : {}),

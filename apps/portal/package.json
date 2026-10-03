@@ -12,6 +12,8 @@
     "build-storybook": "storybook build"
   },
   "dependencies": {
+    "@azure/msal-browser": "^5.16.0",
+    "@azure/msal-react": "^5.5.1",
     "@radix-ui/react-alert-dialog": "^1.1.4",
     "@radix-ui/react-checkbox": "^1.1.4",
     "@radix-ui/react-dialog": "^1.1.4",
@@ -55,17 +57,17 @@
     "@types/dagre": "^0.7.52",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^4.3.4",
+    "@vitejs/plugin-react": "^5.2.0",
     "autoprefixer": "^10.4.20",
     "happy-dom": "^20.9.0",
     "msw": "^2.14.6",
     "msw-storybook-addon": "^2.0.7",
-    "postcss": "^8.4.49",
+    "postcss": "^8.5.10",
     "storybook": "^10.4.0",
     "tailwindcss": "^3.4.17",
     "tailwindcss-animate": "^1.0.7",
     "typescript": "^5.6.2",
-    "vite": "^6.4.2"
+    "vite": "7.3.5"
   },
   "msw": {
     "workerDirectory": [

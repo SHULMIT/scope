@@ -406,6 +406,7 @@ describe("ReportQueueProcessor – handleRequest template validation", () => {
   function makeReportDoc(overrides: Partial<import("shared").ReportDocument> = {}): import("shared").ReportDocument {
     return {
       _id: "report-1",
+      projectId: "proj-1",
       requestId: "req-1",
       status: "pending",
       logs: [],
@@ -429,14 +430,21 @@ describe("ReportQueueProcessor – handleRequest template validation", () => {
     const doc = makeReportDoc({ templateId: "nonexistent-template" });
 
     // Mock fetch to return 404 (fetchReportTemplate returns null)
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+    const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
       status: 404,
-    }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
 
     await expect(
       (processor as any).handleRequest(doc, makeMessage(), "pop-1", log)
     ).rejects.toThrow("Report template 'nonexistent-template' not found");
+
+    // Template lookup must be scoped to the report's project (templates are
+    // project-scoped; a slug-only lookup is rejected by the API).
+    const requestedUrl = String(fetchMock.mock.calls[0][0]);
+    expect(requestedUrl).toContain("/report-templates/nonexistent-template");
+    expect(requestedUrl).toContain("projectId=proj-1");
   });
 });
 

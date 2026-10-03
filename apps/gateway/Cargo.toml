@@ -3,6 +3,9 @@ name = "gateway"
 version = "0.1.0"
 edition = "2021"
 description = "TLS-intercepting HTTP proxy with plugin architecture"
+# First-party application crate — never published to crates.io. Marked private
+# so license tooling (cargo-about) excludes it from the third-party NOTICE.
+publish = false
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

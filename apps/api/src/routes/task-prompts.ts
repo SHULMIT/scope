@@ -15,6 +15,7 @@ import type { RouteContext } from "../route-context.js";
 import { extractPromptFeatures, isLlmAvailable as isPromptFeatureLlmAvailable } from "../prompt-feature-llm.js";
 import { generateTaskPrompt, isTaskPromptLlmAvailable } from "../task-prompt-llm.js";
 import { isInferenceError } from "../llm-token.js";
+import { ProjectIdQuerySchema, getQueryProjectId } from "../utils/project-scope.js";
 
 export function registerTaskPromptsRoutes(ctx: RouteContext): void {
 
@@ -80,7 +81,7 @@ apiRoute(ctx.app, ctx.registry, {
     offset: z.coerce.number().optional(),
     search: z.string().optional(),
     type: PromptTypeSchema.optional(),
-  }),
+  }).merge(ProjectIdQuerySchema),
   response: z.object({
     items: z.array(TaskPromptResponseSchema),
     total: z.number(),
@@ -93,7 +94,7 @@ apiRoute(ctx.app, ctx.registry, {
     const search = req.query.search;
     const type = req.query.type;
 
-    const { items, total } = await ctx.taskPromptStore.getAll({ limit, offset, search, type });
+    const { items, total } = await ctx.taskPromptStore.getAll({ projectId: getQueryProjectId(req), limit, offset, search, type });
     res.json({ items, total, limit, offset });
   },
 });
@@ -161,6 +162,7 @@ apiRoute(ctx.app, ctx.registry, {
   tags: ["Task Prompts"],
   summary: "Create or find task prompt",
   body: CreateTaskPromptInputSchema,
+  query: ProjectIdQuerySchema,
   response: TaskPromptResponseSchema,
   errorResponses: {
     400: { description: "Empty text string" },
@@ -173,7 +175,7 @@ apiRoute(ctx.app, ctx.registry, {
     }
 
     try {
-      const taskPrompt = await ctx.taskPromptStore.findOrCreate(text, type);
+      const taskPrompt = await ctx.taskPromptStore.findOrCreate(getQueryProjectId(req), text, type);
       res.status(201).json(taskPrompt);
     } catch (err) {
       next(err);

@@ -66,11 +66,22 @@ The `azure-ai-foundry` secret stores a JSON blob:
 { "endpoint": "https://<resource>.services.ai.azure.com/models", "apiKey": "…", "model": "gpt-4.1-mini" }
 ```
 
-It is registered from the Portal at `/secrets/keys/new`. The API
-validates new keys by issuing a single `chat/completions` probe against
-the endpoint with `max_tokens=1`, so a misconfigured endpoint (missing
-`/models` suffix) or a wrong deployment name surfaces immediately at
-registration time.
+It is registered from the Portal at `/secrets/keys/new`. Credential validation
+uses a 16-token completion budget, starts with `max_completion_tokens` and
+configured sampling controls, then retries only when Foundry returns a
+structured unsupported-parameter error. Output-limit and other unrelated
+client errors remain validation failures.
+The API uses the same negotiation at runtime and caches the learned shape in
+memory by endpoint and deployment. The cache has no time-based expiration:
+compatibility is relearned after an API process restart or when Azure rejects a
+cached shape. A cached downgrade (for example, omitting `temperature`) cannot
+detect that an Azure deployment changed in place to support the parameter,
+because the downgraded request continues to succeed. Normal application
+deployments restart the API and therefore renegotiate automatically. If a
+Foundry deployment is upgraded or repointed under the same endpoint and model
+name without restarting Scope, restart the API replicas to clear the cache and
+relearn the preferred request shape. Credentials written by earlier versions
+may contain a `requestProfile` field; the parser accepts and ignores it.
 
 ### Capabilities
 
@@ -164,6 +175,34 @@ Each key tracks:
 | `lastAcquiredAt` | Timestamp of most recent acquisition |
 
 This helps identify heavily-used tokens and detect potential issues with token distribution.
+
+## MCP Secrets
+
+Separately from Key Vault-backed API tokens, the Token Manager stores **MCP server secrets** (the
+`env` values and `headers` a run needs to authenticate to an MCP server) in its **own MongoDB
+collection** (`mcp-secrets`), exposed via `mcp-secret-routes.ts`. Secrets are **project-scoped**:
+
+- Each secret document carries a `projectId`, a `mcpId` (the MCP server's **human slug**, never the
+  server's internal UUID `_id`), and a `name`.
+- The unique index is `{ projectId, mcpId, name }` (was the global-unique `{ mcpId, name }`), so the
+  same slug + secret name can exist independently in different projects. The index is reconciled by
+  **migration 028**, which drops the legacy global-unique `{ mcpId, name }` and (re)creates the
+  compound `{ projectId, mcpId, name }`. token-manager also creates the compound index idempotently
+  at startup (a harmless no-op once the migration has run).
+- Every route filter and the insert path require `projectId` (read from the request); all client
+  methods (`storeSecret`, `storeEnv`, `storeHeaders`, `listSecrets`, `resolveSecrets`,
+  `deleteSecret`, `deleteAllSecrets`) take `projectId` as their first argument and forward it.
+- On startup the service **backfills** `projectId` on any pre-existing secrets (deriving it from the
+  referenced server, which is unambiguous because slugs were globally unique before the Projects
+  feature).
+
+These secrets live in the Token Manager's DB, but the db-migration Job reaches the same MongoDB (both
+mount `mongo-config` + `mongo-secrets`, so they resolve the same `MONGO_DATABASE` /
+`MONGO_CONNECTION_STRING`). The unique-index reconciliation therefore runs through
+`packages/db-migrations` as **migration 028**; only the `projectId` value backfill still runs at
+token-manager startup (moving that backfill into a migration too is a noted follow-up). See
+[db.md → Per-project entity keying](db.md#per-project-entity-keying-migration-027) and
+[mcp-gateway.md](mcp-gateway.md) for how a run resolves and hydrates these secrets project-scoped.
 
 ## Configuration
 

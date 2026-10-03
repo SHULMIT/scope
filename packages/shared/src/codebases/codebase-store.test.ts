@@ -85,7 +85,7 @@ describe("CodebaseStore", () => {
     const collection = makeCodebaseCollection();
     const store = new CodebaseStore(collection as unknown as Collection<CodebaseDocument>);
 
-    const created = await store.create({
+    const created = await store.create({ projectId: "proj-test",
       name: "Pamela Fox Site",
       sourceType: "git",
       source: "pamelafox/site",
@@ -110,8 +110,8 @@ describe("CodebaseStore", () => {
   it("gets by slug, soft-deletes codebases, and excludes deleted entries from list", async () => {
     const collection = makeCodebaseCollection();
     const store = new CodebaseStore(collection as unknown as Collection<CodebaseDocument>);
-    const first = await store.create({ name: "First", sourceType: "archive" });
-    const second = await store.create({ name: "Second", sourceType: "archive" });
+    const first = await store.create({ projectId: "proj-test", name: "First", sourceType: "archive" });
+    const second = await store.create({ projectId: "proj-test", name: "Second", sourceType: "archive" });
 
     expect(await store.getBySlug(first.slug)).toEqual(first);
     expect(await store.softDelete(first._id)).toBe(true);
@@ -123,13 +123,13 @@ describe("CodebaseStore", () => {
   it("hard-deletes a codebase, removing it entirely and freeing its slug", async () => {
     const collection = makeCodebaseCollection();
     const store = new CodebaseStore(collection as unknown as Collection<CodebaseDocument>);
-    const created = await store.create({ name: "Orphan", slug: "orphan", sourceType: "archive" });
+    const created = await store.create({ projectId: "proj-test", name: "Orphan", slug: "orphan", sourceType: "archive" });
 
     expect(await store.hardDelete(created._id)).toBe(true);
     // Fully removed (not just soft-deleted): not retrievable even with includeDeleted.
     expect(await store.get(created._id, { includeDeleted: true })).toBeNull();
     // Slug is freed, so a new codebase can reuse it without suffixing.
-    const reused = await store.create({ name: "Reused", slug: "orphan", sourceType: "archive" });
+    const reused = await store.create({ projectId: "proj-test", name: "Reused", slug: "orphan", sourceType: "archive" });
     expect(reused.slug).toBe("orphan");
     // Deleting a missing codebase reports no deletion.
     expect(await store.hardDelete("missing-codebase")).toBe(false);
@@ -138,7 +138,7 @@ describe("CodebaseStore", () => {
   it("allocates revision numbers sequentially and returns null for missing codebases", async () => {
     const collection = makeCodebaseCollection();
     const store = new CodebaseStore(collection as unknown as Collection<CodebaseDocument>);
-    const created = await store.create({ name: "Sequential", sourceType: "archive" });
+    const created = await store.create({ projectId: "proj-test", name: "Sequential", sourceType: "archive" });
 
     await expect(store.allocateRevisionNumber(created._id)).resolves.toBe(1);
     await expect(store.allocateRevisionNumber(created._id)).resolves.toBe(2);
@@ -171,7 +171,7 @@ describe("CodebaseStore", () => {
     };
     const store = new CodebaseStore(collection as unknown as Collection<CodebaseDocument>);
 
-    const created = await store.create({ name: "Race", sourceType: "archive" });
+    const created = await store.create({ projectId: "proj-test", name: "Race", sourceType: "archive" });
 
     expect(created.slug).toBe("race-2");
     expect(created._id).not.toBe("rival");
@@ -191,6 +191,6 @@ describe("CodebaseStore", () => {
     };
     const store = new CodebaseStore(collection as unknown as Collection<CodebaseDocument>);
 
-    await expect(store.create({ name: "Boom", sourceType: "archive" })).rejects.toThrow(/E11000/);
+    await expect(store.create({ projectId: "proj-test", name: "Boom", sourceType: "archive" })).rejects.toThrow(/E11000/);
   });
 });

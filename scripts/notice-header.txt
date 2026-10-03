@@ -1,0 +1,33 @@
+Scope - THIRD-PARTY SOFTWARE NOTICES AND INFORMATION
+Do Not Translate or Localize
+
+This repository incorporates material from the third-party projects listed
+below. The original copyright notices and the full text of the licenses under
+which Microsoft received such material are reproduced in this file. Microsoft
+reserves all rights not expressly granted herein, whether by implication,
+estoppel or otherwise.
+
+Scope of this notice
+--------------------
+This file attributes the third-party open source software that is redistributed
+in this project's runtime / production artifacts (its Docker images and services
+and the compiled `gateway` binary). It covers two ecosystems:
+
+  * npm   - the production dependencies of the pnpm workspace, and
+  * cargo - the crates compiled into the Rust `gateway` binary.
+
+Build-time-only and test-only dependencies (npm devDependencies and Rust
+dev-dependencies) are not redistributed and are therefore not listed. First-party
+Microsoft code in this repository is likewise not listed.
+
+Every per-component license text below is reproduced verbatim, exactly as it
+ships inside the corresponding package, and was extracted mechanically by
+license tooling - `generate-license-file` for npm and `cargo-about` for cargo.
+This file is generated; see scripts/generate-notice.ts. Regenerate it with
+`pnpm notice`. Do not edit it by hand.
+
+Packages that are not open source, and are therefore excluded from the
+attributions below, are listed separately in NOTICE-REVIEW.txt for manual /
+legal (CELA) determination.
+
+===============================================================================

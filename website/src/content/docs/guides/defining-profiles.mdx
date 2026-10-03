@@ -1,0 +1,225 @@
+---
+title: Defining profiles
+description: Save reusable agent setups in Scope and re-run them consistently across benchmarks.
+---
+
+A **profile** captures the full agent setup needed to execute a run:
+worker type, model, agent version, MCP servers, skills, and (where the
+worker supports them) VS Code extensions. Profiles let you re-use the
+same setup across many runs and guarantee that a past run can be
+reproduced exactly.
+
+## When to use profiles
+
+Use a profile when you want to:
+
+- Compare the **same task** across **different agent setups** — create
+  one profile per setup, submit a request per profile against the
+  same task prompt and criteria, compare reports.
+- Share a **tested configuration** with teammates — they pick the
+  profile by name instead of re-deriving the same fields.
+- Pin a run for **audit / reproducibility** — runs record the exact
+  profile version they used.
+
+You don't *need* a profile to submit a run — every field can be set
+inline at submission — but inline runs are harder to compare and
+reproduce later.
+
+## Profile identity vs. profile version
+
+A profile has two layers:
+
+- **Identity** *(mutable)* — `name`, `description`. You can rename or
+  re-describe a profile any time.
+- **Version** *(immutable)* — the actual configuration: worker, model,
+  agent version, MCP servers, skills, extensions. **Once a version is
+  saved, it never changes.**
+
+When you change a profile's configuration, Scope creates a new
+version (v2, v3, …) instead of mutating the existing one. The latest
+version is what's used by default when you select the profile in a new
+run, but every prior version is kept and can be referenced
+explicitly.
+
+This is the property that makes runs reproducible: a run record points
+at a specific `profileVersionId` that is guaranteed not to drift.
+
+## Anatomy of a profile
+
+| Field | Layer | Description |
+| --- | --- | --- |
+| `name` | identity | Human-readable, 1–128 characters. |
+| `description` | identity | Optional, up to 512 characters. |
+| `workerType` | version | Which agent runtime — see [Choosing a coding agent](/guides/choosing-a-coding-agent/). |
+| `model` | version | Model identifier (e.g. `gpt-4o`, `claude-3.5-sonnet`). |
+| `agentVersion` | version | Optional; pins a specific agent build. Latest active build is used if omitted. |
+| `mcpServers` | version | Optional list of MCP server slugs. |
+| `skillRevisions` | version | Optional list of Copilot agent skills, pinned to commit. |
+| `extensions` | version | Optional list of VS Code extensions. **VS Code Copilot only.** |
+
+For full field details and types, see the
+[Profile schema reference](/reference/profile-schema/).
+
+## Creating a profile
+
+### From the Portal
+
+1. Open **Profiles** in the navigation, then click **New profile**.
+2. Fill in `name` and (optionally) `description`.
+3. Pick a **worker** and **model**. These are required.
+4. Optionally add an `agentVersion`, MCP servers, skills, and
+   extensions.
+5. Click **Create**. The profile is created at version 1.
+
+### From the REST API
+
+```http
+POST /api/v1/profiles
+Content-Type: application/json
+
+{
+  "name": "Copilot + Azure Skills",
+  "description": "Latest Copilot with the Azure context skill",
+  "workerType": "coder-acp-copilot",
+  "model": "gpt-4o",
+  "mcpServers": ["filesystem", "github"],
+  "skillRevisions": ["github/vercel-labs/agent-skills/azure"]
+}
+```
+
+The response includes the new profile and its v1 version.
+
+## Creating a new version
+
+Configurations evolve. When you want to capture a change (e.g. swap
+the model, add a skill), create a new version instead of mutating the
+existing one.
+
+### From the Portal
+
+On the profile detail page, click **New version**. The form is
+pre-populated with the current latest version's fields — edit what you
+need and save.
+
+### From the REST API
+
+```http
+POST /api/v1/profiles/{profileId}
+Content-Type: application/json
+
+{
+  "workerType": "coder-acp-copilot",
+  "model": "gpt-4o",
+  "agentVersion": "copilot-0.0.418",
+  "mcpServers": ["filesystem", "github"],
+  "skillRevisions": ["github/vercel-labs/agent-skills/azure"]
+}
+```
+
+The new version becomes the profile's `latestVersion`.
+
+## Using a profile when submitting a run
+
+### Portal
+
+In the request submit form, pick the profile from the dropdown. The
+configuration fields lock to that profile's latest version. Expand the
+version selector to choose an older version explicitly.
+
+See [Submitting requests (Portal)](/guides/submitting-requests-portal/).
+
+### REST API
+
+Pass `profileId` (resolves to latest version) or `profileVersionId`
+(pins a specific version):
+
+```json
+{
+  "scenario": {
+    "task": "Create a Hello World Node.js / Express REST API.",
+    "criteria": ["c-hello-world-express"]
+  },
+  "profileVersionId": "p-550e8400-e29b-41d4-a716-446655440001@2"
+}
+```
+
+For production pipelines, **prefer `profileVersionId`** — it shields
+your pipeline from later edits to the profile.
+
+See [Submitting requests (REST API)](/guides/submitting-requests-api/).
+
+## Save-as-profile from a run
+
+The Portal's submit form has a **Save as profile** button. After
+configuring a run inline, click it to capture the current fields as a
+new profile (v1) without leaving the submission flow.
+
+## Pinning behavior
+
+Scope pins versionable references inside a profile so that
+re-running the profile later produces the same code paths:
+
+- **Skills** — when you provide a skill slug like
+  `github/vercel-labs/agent-skills/azure`, Scope resolves it to a
+  commit hash and stores `…/azure@<commit>` in the version. If you
+  pre-pin (`…/azure@abc1234`), it's accepted as-is.
+- **Extensions** — extension IDs like `ms-python.python` resolve to the
+  latest stable version (`ms-python.python@2024.8.1`). Pre-pinned
+  values pass through.
+
+Pinning happens at version-creation time. The pinned values are part
+of the immutable version record.
+
+## Soft-delete
+
+Deleting a profile is a soft-delete:
+
+- The profile disappears from list views and is no longer selectable
+  in the submit form.
+- `GET /api/v1/profiles/:id` returns 404.
+- Past runs that referenced this profile **still resolve correctly** —
+  the historical configuration is preserved.
+
+There's no hard-delete from the user-facing surface.
+
+## Worker-specific constraints
+
+The `extensions` field is only valid on the **VS Code Copilot**
+coding agent. The GitHub Copilot CLI and Claude Code CLI agents
+do not support VS Code extensions. Trying to attach extensions
+to those agents returns:
+
+```
+HTTP 400 — "Worker type 'coder-acp-copilot' does not support VS Code extensions"
+```
+
+See [Choosing a coding agent](/guides/choosing-a-coding-agent/) for the full
+capability matrix.
+
+## Naming conventions
+
+There's no enforcement, but in practice these names age well:
+
+- Lead with the **agent and model**: `"Copilot + GPT-4o"`,
+  `"Claude 3.5 Sonnet"`.
+- Add a tools hint when relevant: `"Copilot + Azure Skills"`.
+- Don't put dates in the name — the version's `createdAt` already
+  records when it was made.
+
+## Common mistakes
+
+- **Editing a profile expecting versions to mutate.** Versions are
+  immutable. Editing creates a new version; older versions still exist
+  and are still referenced by past runs.
+- **Attaching extensions to a CLI-based agent.** Returns 400.
+  Use VS Code Copilot, or remove the extensions.
+- **Submitting with `profileId` in production.** Works, but uses
+  *whatever* the latest version is at submission time. Use
+  `profileVersionId` for stable pipelines.
+
+## See also
+
+- [Profile schema reference](/reference/profile-schema/)
+- [Submitting requests (Portal)](/guides/submitting-requests-portal/)
+- [Submitting requests (REST API)](/guides/submitting-requests-api/)
+- [Using MCP servers, skills & extensions](/guides/mcp-skills-extensions/)

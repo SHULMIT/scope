@@ -1,0 +1,211 @@
+---
+title: Importing MCP servers
+description: Register MCP servers in Scope so they can be attached to profiles and used during runs.
+---
+
+Before you can reference an MCP server in a
+[profile](/guides/defining-profiles/) or a run, it must be
+**imported** into your Scope deployment. Importing registers
+the server's connection details — transport type, URL or
+command, and any secrets — so that workers can start the server
+automatically when a run begins.
+
+## Transport types
+
+Scope supports three MCP transport types:
+
+| Type | When to use | Key fields |
+| --- | --- | --- |
+| `http` | The MCP server is a remote HTTP endpoint. | `url`, `headers` |
+| `sse` | The MCP server uses Server-Sent Events. | `url`, `headers` |
+| `stdio` | The MCP server runs as a local process. | `command`, `args`, `env` |
+
+## Server IDs (slugs)
+
+Every MCP server has an `_id` that acts as its slug throughout
+the system. The ID must be **lowercase alphanumeric plus
+hyphens**, matching the pattern:
+
+```
+^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+```
+
+Examples: `filesystem`, `github`, `my-custom-tools`.
+
+## Importing from the Portal
+
+1. Open **MCP Servers** in the Portal sidebar.
+2. Click **Add MCP Server**.
+3. Fill in the slug (`_id`), display name, transport type, and
+   connection details (URL or command).
+4. Submit. The server is registered and immediately available
+   for use in profiles.
+
+## Importing via the REST API
+
+Use `POST /api/v1/mcp/servers` to register an MCP server:
+
+```http
+POST /api/v1/mcp/servers
+Content-Type: application/json
+
+{
+  "_id": "github",
+  "name": "GitHub MCP Server",
+  "type": "http",
+  "url": "https://mcp.example.com/github",
+  "description": "Provides GitHub tools to the agent"
+}
+```
+
+### Request fields
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `_id` | string | ✅ | Server slug (lowercase alphanumeric + hyphens). |
+| `name` | string | ✅ | Human-readable display name. |
+| `type` | string | ✅ | `"http"`, `"sse"`, or `"stdio"`. |
+| `url` | string | — | Server URL (for `http` and `sse`). |
+| `command` | string | — | Executable to run (for `stdio`). |
+| `args` | string[] | — | Arguments passed to the command (for `stdio`). |
+| `env` | object | — | Environment variables for the process (for `stdio`). |
+| `headers` | array | — | Custom HTTP headers (for `http` / `sse`). Each entry has `name` and `value`. |
+| `sessionMode` | string | — | `"stateful"` or `"stateless"`. |
+| `version` | string | — | Server version string. |
+| `description` | string | — | Free-form description. |
+
+The endpoint uses **upsert** semantics — it returns **201** for
+a new server or **200** if the server already exists and was
+updated. A previously soft-deleted server is restored.
+
+### stdio example
+
+```http
+POST /api/v1/mcp/servers
+Content-Type: application/json
+
+{
+  "_id": "local-tools",
+  "name": "Local Tools",
+  "type": "stdio",
+  "command": "npx",
+  "args": ["-y", "@example/mcp-tools"],
+  "env": { "API_KEY": "sk-..." }
+}
+```
+
+### Headers example (http / sse)
+
+```http
+POST /api/v1/mcp/servers
+Content-Type: application/json
+
+{
+  "_id": "secure-endpoint",
+  "name": "Secure Endpoint",
+  "type": "sse",
+  "url": "https://mcp.example.com/sse",
+  "headers": [
+    { "name": "Authorization", "value": "Bearer tok_..." }
+  ]
+}
+```
+
+## Secret handling
+
+Environment variables (`env`) and custom headers (`headers`) may
+contain secrets such as API keys. Scope masks secret values in API
+responses.
+
+- **On read**, secret values are masked as `"<secret>"` — you
+  will never see the plaintext in GET responses.
+- **On update**, sending `"<secret>"` or `""` for a value tells
+  Scope to **keep the existing secret** unchanged. Sending a
+  real value overwrites it. Omitting a key deletes it.
+
+You cannot provide both `env` and `headers` on the same server.
+Use `env` for `stdio` servers and `headers` for `http` / `sse`
+servers.
+
+## Listing MCP servers
+
+```http
+GET /api/v1/mcp/servers
+```
+
+Returns all active (non-deleted) servers sorted alphabetically
+by `_id`. Secret values are never included in list responses.
+
+## Getting a single server
+
+```http
+GET /api/v1/mcp/servers/github
+```
+
+Returns the server details. Secret fields are present but
+masked as `"<secret>"`.
+
+## Updating a server
+
+Use `PUT /api/v1/mcp/servers/:id` to update any field. All
+fields are optional — only the fields you include are changed:
+
+```http
+PUT /api/v1/mcp/servers/github
+Content-Type: application/json
+
+{
+  "description": "Updated description",
+  "url": "https://mcp-v2.example.com/github"
+}
+```
+
+If you change the transport type (e.g. from `stdio` to `http`),
+any stored secrets are automatically deleted to prevent
+misinterpretation.
+
+## Deleting a server
+
+Deleting is a **soft delete** — the server disappears from
+lists and can no longer be added to new profiles, but past runs
+that used it are unaffected.
+
+```http
+DELETE /api/v1/mcp/servers/github
+```
+
+Returns **204** on success.
+
+## Using imported servers in profiles
+
+After importing, reference servers in a profile's `mcpServers`
+array by their slug:
+
+```json
+{
+  "mcpServers": ["filesystem", "github"]
+}
+```
+
+The agent gains access to whatever tools the MCP server
+exposes. For more on how MCP servers fit into profiles, see
+[Using MCP servers, skills & extensions](/guides/mcp-skills-extensions/).
+
+## Tips
+
+- **Register before you profile.** MCP servers must be imported
+  before they can appear in a profile. Import first, then create
+  the profile.
+- **Use `stdio` for local tools.** If the MCP server is a CLI
+  tool or npm package, `stdio` keeps everything self-contained.
+- **Use `http` or `sse` for shared services.** Remote MCP
+  servers used by multiple profiles benefit from a single
+  centralized deployment.
+- **Rotate secrets via update.** Send the new value in a PUT request to
+  replace the existing secret.
+
+## See also
+
+- [Using MCP servers, skills & extensions](/guides/mcp-skills-extensions/)
+- [Defining profiles](/guides/defining-profiles/)
+- [Choosing a coding agent](/guides/choosing-a-coding-agent/)

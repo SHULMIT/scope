@@ -6,7 +6,8 @@ import { configureHelp } from "../utils/helpFormatter.js";
 import { dimTimestamp, errorText, successText, label, value, warnBanner } from "../utils/style.js";
 import { formatData, isMachineReadable } from "../utils/formatters.js";
 import type { OutputFormat, DisplayField } from "../utils/types.js";
-import { withOutputOption, getDefaultApiUrl } from "../utils/shared.js";
+import { withOutputOption, withProjectOption, getDefaultApiUrl } from "../utils/shared.js";
+import { requireProjectId } from "../utils/config.js";
 import { apiFetch } from "../utils/api-client.js";
 
 export function registerInsightCommands(program: Command): void {
@@ -21,22 +22,23 @@ const insight = program
 
 configureHelp(insight);
 
-withOutputOption(
+withProjectOption(withOutputOption(
 insight
   .command("list")
   .description("List all insights")
   .option("-q, --query <query>", "Search by keyword")
   .option("--blocked", "Show only blocked insights")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
-)
+))
   .action(async (options) => {
     const format = (options.output || 'table') as OutputFormat;
+    const projectId = requireProjectId(options.project);
     try {
       const params = new URLSearchParams();
       if (options.query) params.set("q", options.query);
       if (options.blocked) params.set("blocked", "true");
       const qs = params.toString();
-      const response = await apiFetch(options.url, `/insights${qs ? `?${qs}` : ""}`);
+      const response = await apiFetch(options.url, `/insights${qs ? `?${qs}` : ""}`, { projectId });
       if (!response.ok) {
         const error = await response.json();
         console.error(errorText("Error:"), error.error || JSON.stringify(error));
@@ -130,8 +132,10 @@ insight
   .option("--category <category>", "Category tag")
   .option("--tags <tags>", "Comma-separated tags")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
+  .option("--project <id>", "Project ID for scoped operations (overrides SCOPE_PROJECT and the saved selection)")
   .action(async (options) => {
     try {
+      const projectId = requireProjectId(options.project);
       const body: Record<string, unknown> = {
         title: options.title,
         description: options.description,
@@ -144,6 +148,7 @@ insight
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        projectId,
       });
       if (!response.ok) {
         const error = await response.json();

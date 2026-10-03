@@ -14,9 +14,12 @@ yarn.lock
 .vscode/settings.json
 .azure/
 .venv/
+__pycache__/
+*.pyc
 downloads/
 ctrf/
 coverage/
+evaluations/static-prompts/results/
 .auth/
 test-videos/
 test-snapshots/
@@ -24,3 +27,10 @@ test-snapshots/
 plan.md
 plan.md
 tmp/
+.backups/
+
+# Local dev TLS certs (mkcert) for the entra-local auth emulator
+.certs/
+
+# NOTICE generation build cache (scripts/generate-notice.ts)
+.notice-build/

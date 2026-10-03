@@ -112,6 +112,7 @@ describe("ProfileResponseSchema", () => {
   it("parses a valid profile response", () => {
     const data = {
       _id: "p-123",
+      projectId: "proj-test",
       name: "Test Profile",
       latestVersion: 3,
       createdAt: "2025-01-01T00:00:00Z",
@@ -128,6 +129,7 @@ describe("ProfileVersionResponseSchema", () => {
   it("parses a valid version response", () => {
     const data = {
       _id: "pv-123",
+      projectId: "proj-test",
       profileId: "p-123",
       version: 1,
       workerType: "coder-acp-copilot",
@@ -155,11 +157,13 @@ describe("ProfileWithVersionResponseSchema", () => {
   it("parses a profile with embedded version", () => {
     const data = {
       _id: "p-123",
+      projectId: "proj-test",
       name: "Test Profile",
       latestVersion: 1,
       createdAt: "2025-01-01T00:00:00Z",
       version: {
         _id: "pv-123",
+        projectId: "proj-test",
         profileId: "p-123",
         version: 1,
         workerType: "coder-acp-copilot",

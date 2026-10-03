@@ -2,20 +2,45 @@
 // Licensed under the MIT License.
 
 import { CodingAgentQueueProcessor, WorkerProcessor, WorkerProcessorOptions, WorkerResult, QueueProcessorConfig, LogEvent, WorkerLogFn, TokenManagerClient, createProxyClient, isProxyEnabled, type ProxyClient, McpGatewayClient, McpServerConfig, KubedockClient, createFreshWorkspace, cleanupWorkspaces } from "shared";
+import { initTelemetry, trackMetric, trackTrace, trackEvent } from "telemetry";
 import { runACPSession } from "./acp-client.js";
 import dotenv from "dotenv";
 
 dotenv.config();
 
+// Initialize telemetry before any other setup
+initTelemetry(process.env.WORKER_NAME || "coder-acp-claude-code");
+
 const WORKER_NAME = process.env.WORKER_NAME || "coder-acp-claude-code";
 const tokenClient = new TokenManagerClient();
-const AGENT_VERSION = `claude-agent-acp-${process.env.CLAUDE_CODE_ACP_VERSION || "unknown"}-sdk-${process.env.CLAUDE_AGENT_SDK_VERSION || "unknown"}`;
+const AGENT_VERSION =
+  process.env.SCOPE_AGENT_VERSION ||
+  `claude-agent-acp-${process.env.CLAUDE_CODE_ACP_VERSION || "unknown"}-sdk-${process.env.CLAUDE_AGENT_SDK_VERSION || "unknown"}`;
+
+/**
+ * Detect the first structured "AI turn" signal from a subprocess log line.
+ */
+function isFirstAiCallSignal(msg: string): boolean {
+  if (msg.includes("createTurn")) return true;
+  const trimmed = msg.trim();
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      return typeof parsed === "object" && parsed !== null && typeof parsed.type === "string";
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
 
 class ClaudeCodeProcessor implements WorkerProcessor {
   readonly workerName = WORKER_NAME;
+  readonly skillAgentType = "claude-code" as const;
   workspacePath: string | undefined = undefined;
   private gateway: McpGatewayClient | null = null;
   private mcpConfigs: McpServerConfig[] = [];
+  private static coldStartTracked = false;
   private kubedock: KubedockClient | null = null;
 
   getAgentVersion(): string {
@@ -91,6 +116,24 @@ class ClaudeCodeProcessor implements WorkerProcessor {
     log: (level: LogEvent["level"], message: string, data?: Record<string, unknown>) => Promise<void>,
     options?: WorkerProcessorOptions
   ): Promise<WorkerResult> {
+    const runStartTime = Date.now();
+    const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const workerType = WORKER_NAME;
+    let firstAiCallTracked = false;
+    let lastProtocolEventTime = Date.now();
+
+    // Periodically emit subprocess idle gaps during active runs
+    const idleMonitor = setInterval(() => {
+      const gapMs = Date.now() - lastProtocolEventTime;
+      if (gapMs > 60_000) {
+        trackMetric({
+          name: "worker.subprocess_idle_s",
+          value: gapMs / 1000,
+          properties: { runId, workerType },
+        });
+      }
+    }, 30_000);
+
     const skillConfigs = options?.skillConfigs ?? [];
     await log("info", "Starting Claude Code ACP processor", {
       inputLength: message.length,
@@ -100,6 +143,11 @@ class ClaudeCodeProcessor implements WorkerProcessor {
       mcpServers: this.mcpConfigs.map((s) => ({ name: s.name, type: s.type, url: s.url })),
       skillCount: skillConfigs.length,
       skills: skillConfigs.map((s) => s.name),
+    });
+
+    trackEvent({
+      name: "worker.run_started",
+      properties: { runId, workerType, model: options?.model || "default" },
     });
 
     // Proxy integration — start recording if enabled
@@ -171,6 +219,20 @@ class ClaudeCodeProcessor implements WorkerProcessor {
         env,
         cwd: this.workspacePath!,
         onLog: async (msg) => {
+          lastProtocolEventTime = Date.now();
+          if (!firstAiCallTracked && isFirstAiCallSignal(msg)) {
+            firstAiCallTracked = true;
+            trackMetric({
+              name: "worker.first_ai_call_ms",
+              value: Date.now() - runStartTime,
+              properties: { runId, workerType },
+            });
+          }
+          trackTrace({
+            message: msg,
+            severityLevel: "Verbose",
+            properties: { runId, workerType },
+          });
           await log("debug", msg);
         },
         mcpServers: this.gateway && this.mcpConfigs.length > 0
@@ -183,6 +245,31 @@ class ClaudeCodeProcessor implements WorkerProcessor {
         stopReason: result.stopReason,
         responseLength: result.response.length 
       });
+
+      const runDurationMs = Date.now() - runStartTime;
+      trackMetric({
+        name: "worker.run_duration_ms",
+        value: runDurationMs,
+        properties: { runId, workerType, stopReason: result.stopReason },
+      });
+
+      if (!ClaudeCodeProcessor.coldStartTracked) {
+        ClaudeCodeProcessor.coldStartTracked = true;
+        trackMetric({
+          name: "worker.cold_start_ms",
+          value: process.uptime() * 1000,
+          properties: { workerType },
+        });
+      }
+
+      const subprocessIdleS = (Date.now() - lastProtocolEventTime) / 1000;
+      trackMetric({
+        name: "worker.subprocess_idle_s",
+        value: subprocessIdleS,
+        properties: { runId, workerType },
+      });
+
+      clearInterval(idleMonitor);
 
       const response = result.response || `[${this.workerName}] No response from Claude Code`;
       const { harFilePath, tokenUsage, aiCallCount } = devProxy
@@ -201,6 +288,7 @@ class ClaudeCodeProcessor implements WorkerProcessor {
       }
       const errorMessage = error instanceof Error ? error.message : String(error);
       await log("error", `Claude Code processing failed: ${errorMessage}`);
+      clearInterval(idleMonitor);
       throw error;
     }
   }

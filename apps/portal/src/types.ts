@@ -102,6 +102,8 @@ export interface RunState {
   harUrl?: string;
   videoUrls?: string[];
   setupVideoUrls?: string[];
+  resources?: ResourceRunOutcome[];
+  mcpRegistered?: boolean;
   tokenUsage?: TokenUsage;
   aiCallCount?: number;
   rawChatUrl?: string;
@@ -132,12 +134,11 @@ export interface Run {
   updatedAt?: string;
   deletedAt?: string;
   taskPromptId?: string;
-  /** @deprecated — use taskPromptId instead */
-  promptFeatureExtractionId?: string;
   mcpServers?: string[];
   skills?: string[];
   skillRevisions?: string[];
   codebaseRevisionId?: string;
+  resources?: ResourceBinding[];
   extensions?: string[];
   priority?: number;
   submissionId?: string;
@@ -183,14 +184,6 @@ export interface GateRunSummary {
   status: "passed" | "failed" | "skipped";
   iterations: number;
 }
-
-export const WORKER_TYPES = [
-  "coder-acp-claude-code",
-  "coder-acp-copilot",
-  "coder-acp-copilot-windows"
-] as const;
-
-export type WorkerType = (typeof WORKER_TYPES)[number];
 
 export const STATUS_LIST: RunStatus[] = [
   "pending",
@@ -261,18 +254,6 @@ export interface SuggestedPromptFeature {
   prompt: string;
 }
 
-export interface PromptFeatureExtraction {
-  _id?: string;
-  taskText: string;
-  taskTextHash?: string;
-  promptFeatureResults: PromptFeatureResult[];
-  suggestedFeatures?: SuggestedPromptFeature[];
-  extractedAt: string;
-  model?: string;
-  cached?: boolean;
-}
-
-// Task Prompt types (first-class entity for benchmark task texts)
 export interface TaskPrompt {
   _id: string;                          // UUIDv5 content-addressed ID
   text?: string;                        // Full task prompt text (absent when blob-backed)
@@ -688,7 +669,7 @@ export interface AgentVersion {
   gitCommit: string;
   buildTime: string;
   imageTag: string;
-  queueName: string;
+  queueName?: string;
   status: "active" | "retired";
   createdAt: string;
 }
@@ -696,6 +677,9 @@ export interface AgentVersion {
 // Agent capabilities declared at the worker level
 export interface AgentCapabilities {
   supportsReasoningEffort?: boolean;
+  supportsMcpServers?: boolean;
+  supportsSkills?: boolean;
+  supportsExtensions?: boolean;
 }
 
 // Coding Agent types
@@ -712,6 +696,30 @@ export interface CodingAgent {
   createdAt: string;
   updatedAt?: string;
   deletedAt?: string;
+}
+
+export function getActiveAgentVersions(agent: CodingAgent): AgentVersion[] {
+  return (agent.versions ?? []).filter(
+    (version) => version.status === "active" && (version.queueName?.trim().length ?? 0) > 0,
+  );
+}
+
+export function isAgentAvailable(agent: CodingAgent): boolean {
+  return agent.available === true
+    && !agent.deletedAt
+    && getActiveAgentVersions(agent).length > 0;
+}
+
+export function isAgentVersionAvailable(
+  agent: CodingAgent | undefined,
+  agentVersion?: string,
+): boolean {
+  return !!agent
+    && isAgentAvailable(agent)
+    && (!agentVersion
+      || getActiveAgentVersions(agent).some(
+        (version) => version.agentVersion === agentVersion,
+      ));
 }
 
 // MCP Server types
@@ -946,6 +954,104 @@ export interface CodebaseRevisionDocument {
 }
 
 // =============================================================================
+// Resource types
+// =============================================================================
+
+export type ResourceInterpreter = "sh";
+
+export type ResourceScript = Partial<Record<ResourceInterpreter, string>>;
+
+/** One input a resource revision's lifecycle scripts read from the environment. */
+export interface ResourceParameter {
+  name: string;
+  description?: string;
+  required: boolean;
+  default?: string;
+  example?: string;
+}
+
+/** A resource reference before submit-time revision and parameter resolution. */
+export interface ResourceBindingSpec {
+  ref: string;
+  params?: Record<string, string>;
+}
+
+/** Resolved, pinned resource binding persisted on a request. */
+export interface ResourceBinding {
+  ref: string;
+  revisionId: string;
+  params: Record<string, string>;
+}
+
+/** A first-class resource entity (mutable pointer/metadata). */
+export interface ResourceDocument {
+  _id: string;
+  projectId: string;
+  slug: string;
+  name: string;
+  description?: string;
+  revisionCounter: number;
+  latestRevisionId?: string;
+  latestRevisionNumber?: number;
+  creator?: string;
+  createdAt: string;
+  updatedAt?: string;
+  deletedAt?: string;
+}
+
+/** An immutable lifecycle revision for a resource. */
+export interface ResourceRevisionDocument {
+  _id: string;
+  resourceId: string;
+  projectId: string;
+  slug: string;
+  revisionNumber: number;
+  ref: string;
+  setup: ResourceScript;
+  teardown?: ResourceScript;
+  exports: string[];
+  parameters?: ResourceParameter[];
+  contentSha256: string;
+  creator?: string;
+  createdAt: string;
+  deletedAt?: string;
+  /**
+   * Present only on create responses: true when the latest revision was reused
+   * because the submitted lifecycle content was identical.
+   */
+  deduplicated?: boolean;
+}
+
+export interface CreateResourceBody {
+  name: string;
+  slug?: string;
+  description?: string;
+  setup: ResourceScript;
+  teardown?: ResourceScript;
+  exports: string[];
+  parameters?: ResourceParameter[];
+}
+
+export interface CreateResourceRevisionBody {
+  setup: ResourceScript;
+  teardown?: ResourceScript;
+  exports: string[];
+  parameters?: ResourceParameter[];
+}
+
+export interface ResourceRunOutcome {
+  ref: string;
+  slug: string;
+  revisionId: string;
+  setupSucceeded: boolean;
+  published: string[];
+  params?: Record<string, string>;
+  setupDurationMs?: number;
+  error?: string;
+  teardownRan?: boolean;
+}
+
+// =============================================================================
 // VS Code extension types
 // =============================================================================
 
@@ -1015,6 +1121,7 @@ export interface ProfileVersionDocument {
   agentVersion?: string;
   mcpServers?: string[];
   skillRevisions?: string[];
+  resources?: ResourceBindingSpec[];
   extensions?: string[];
   createdAt: string;
 }
@@ -1105,3 +1212,36 @@ export type RunSortField =
   | "id"
   | "duration";
 export type RunSortDir = "asc" | "desc";
+
+// --- Projects ---
+
+/**
+ * A project as returned by the API (`GET /projects`). A project is the
+ * top-level, unscoped container that every scoped entity carries a `projectId`
+ * for. There is no "default" project. Dates arrive as ISO strings over JSON;
+ * `id` mirrors `_id`.
+ */
+export interface Project {
+  _id: string;
+  /** Mirror of `_id` added by the API response. */
+  id?: string;
+  name: string;
+  description?: string;
+  creator?: string;
+  createdAt: string;
+  updatedAt?: string;
+  deletedAt?: string;
+}
+
+/** Body for creating a project (`POST /projects`). */
+export interface CreateProjectRequest {
+  name: string;
+  description?: string;
+  creator?: string;
+}
+
+/** Body for updating a project (`PATCH /projects/:id`). */
+export interface UpdateProjectRequest {
+  name?: string;
+  description?: string;
+}

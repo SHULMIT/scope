@@ -43,7 +43,7 @@ describe("prompt-feature list", () => {
     try {
       const program = makeProgram();
       await program.parseAsync(
-        ["prompt-feature", "list", "--type", "agents.md", "-u", "http://localhost:3100"],
+        ["prompt-feature", "list", "--type", "agents.md", "-u", "http://localhost:3100", "--project", "proj-test"],
         { from: "user" },
       );
     } finally {
@@ -51,6 +51,7 @@ describe("prompt-feature list", () => {
     }
 
     expect(lastRequest?.url).toContain("type=agents.md");
+    expect(lastRequest?.url).toContain("projectId=proj-test");
   });
 
   it("renders a Type column defaulting to 'select'", async () => {
@@ -62,7 +63,7 @@ describe("prompt-feature list", () => {
 
     try {
       const program = makeProgram();
-      await program.parseAsync(["prompt-feature", "list", "-u", "http://localhost:3100"], { from: "user" });
+      await program.parseAsync(["prompt-feature", "list", "-u", "http://localhost:3100", "--project", "proj-test"], { from: "user" });
     } finally {
       logSpy.mockRestore();
     }
@@ -82,7 +83,7 @@ describe("prompt-feature create", () => {
     try {
       const program = makeProgram();
       await program.parseAsync(
-        ["prompt-feature", "create", "--id", "my_feat", "--prompt", "detect x", "--type", "agents.md", "-u", "http://localhost:3100"],
+        ["prompt-feature", "create", "--id", "my_feat", "--prompt", "detect x", "--type", "agents.md", "-u", "http://localhost:3100", "--project", "proj-test"],
         { from: "user" },
       );
     } finally {
@@ -90,6 +91,7 @@ describe("prompt-feature create", () => {
     }
 
     expect(JSON.parse(lastRequest!.body)).toEqual({ id: "my_feat", prompt: "detect x", type: "agents.md" });
+    expect(lastRequest!.url).toContain("projectId=proj-test");
   });
 
   it("omits type when not provided (backward compatible)", async () => {
@@ -99,7 +101,7 @@ describe("prompt-feature create", () => {
     try {
       const program = makeProgram();
       await program.parseAsync(
-        ["prompt-feature", "create", "--id", "my_feat2", "--prompt", "detect y", "-u", "http://localhost:3100"],
+        ["prompt-feature", "create", "--id", "my_feat2", "--prompt", "detect y", "-u", "http://localhost:3100", "--project", "proj-test"],
         { from: "user" },
       );
     } finally {

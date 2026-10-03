@@ -1,0 +1,103 @@
+---
+title: Prioritizing & pausing requests
+description: Reorder the request queue or pause running requests without losing state.
+---
+
+Requests you've submitted start as **pending**. The scheduler picks
+them up in priority order — highest first — and dispatches them to a
+queue where coding-agent workers consume them and produce a
+[run](/introduction/concepts/#run). You can re-prioritize, pause, or
+resume requests at any time without losing state.
+
+## Request priority
+
+Each request has a numeric **priority** in the range **−10 to +10**.
+Higher values are dispatched earlier; the default priority is **0**.
+
+When you change a request's priority, the queue is reordered on the
+next scheduler tick (within seconds) — no need to cancel and resubmit.
+
+## Reorder & re-prioritize
+
+### Portal
+
+On a pending request's detail page, change the **Priority** field. The
+queue position updates as soon as you save. The Portal exposes
+−10…+10 presets and ±1/±5 increments, plus bulk actions on the
+**Runs** list page.
+
+### REST API
+
+Priority is editable while a request is **pending** or **paused**.
+The exact endpoint shape (single vs bulk) is in the
+[REST API reference](/reference/api/). At a glance:
+
+- Single-request priority change.
+- Bulk priority change for a list of request IDs.
+
+Changing priority on an in-flight run doesn't interrupt the run; it
+takes effect on the next pickup.
+
+### CLI
+
+Cancel one or more runs from the terminal:
+
+```bash
+scope run cancel -i <request-id>
+```
+
+## Pausing and resuming
+
+You can pause a pending request to keep its place in the queue without
+consuming worker capacity, then resume it later. State is preserved.
+
+### Portal
+
+The **Pause** button on the request detail page transitions the
+request to a paused state. **Resume** sends it back to its previous
+state with the same priority.
+
+The **Runs** list also offers a bulk pause/resume action.
+
+## Out-of-band (OOB) requests
+
+Because the scheduler dispatches by priority on every tick, a request
+submitted with a high priority jumps ahead of the pending queue and
+reaches a worker on the next dispatch — without disturbing in-flight
+runs and without a separate execution path. Submit normally and set
+priority high.
+
+## Cancelling
+
+Cancel a request from its detail page in the Portal, or:
+
+```http
+DELETE /api/v1/requests/{requestId}
+```
+
+This is a soft-delete — the request is hidden from list views, logs
+and configuration are preserved for inspection, but no further runs
+will execute.
+
+## When to use what
+
+- **Bump priority** when a request you care about is stuck behind
+  bulk requests.
+- **Pause** when you want to free worker capacity temporarily without
+  giving up the request's place in line.
+- **Cancel** when a request is no longer relevant — e.g. you spotted
+  a bad criteria set and re-submitted with a fix.
+
+## Tips
+
+- **Don't fight the queue.** If you find yourself reprioritizing every
+  request to +10, the priority field stops being useful. Keep the
+  default for routine work.
+- **Pause is cheap.** It's safer than cancel-and-resubmit if you just
+  need a moment to free capacity.
+
+## See also
+
+- [Submitting requests (Portal)](/guides/submitting-requests-portal/)
+- [Submitting requests (REST API)](/guides/submitting-requests-api/)
+- [Submitting requests (CLI)](/guides/submitting-requests-cli/)

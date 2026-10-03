@@ -4,7 +4,10 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import request from "supertest";
 import { app, _injectTestDependencies } from "./index.js";
+import { useTestServer } from "./test-server.js";
 import { createAllMockDependencies, createMockCollection } from "./test-helpers.js";
+
+const TEST_PROJECT_ID = "test-project";
 
 // Stub checkMigrations before it can be imported by index.ts
 vi.mock("db-migrations/check-migrations", () => ({
@@ -30,6 +33,7 @@ vi.mock("./task-prompt-llm.js", () => ({
 }));
 
 describe("Profile API Endpoints", () => {
+  const testServer = useTestServer(app);
   let mocks: ReturnType<typeof createAllMockDependencies>;
 
   beforeAll(() => {
@@ -47,7 +51,17 @@ describe("Profile API Endpoints", () => {
     (mocks.agentCollection.findOne as any).mockResolvedValue({
       _id: "coder-acp-copilot",
       name: "Copilot",
+      available: true,
       supportedModels: ["gpt-4o", "gpt-5"],
+      capabilities: { supportsExtensions: false },
+      versions: [
+        {
+          agentVersion: "v1",
+          status: "active",
+          queueName: "queue-coder-acp-copilot",
+          createdAt: new Date(),
+        },
+      ],
     });
   });
 
@@ -58,8 +72,8 @@ describe("Profile API Endpoints", () => {
       profileCol.insertOne = vi.fn().mockResolvedValue({ insertedId: "p-new" });
       versionCol.insertOne = vi.fn().mockResolvedValue({ insertedId: "pv-new" });
 
-      const res = await request(app)
-        .post("/api/v1/profiles")
+      const res = await request(testServer())
+        .post(`/api/v1/profiles?projectId=${TEST_PROJECT_ID}`)
         .send({
           name: "Test Profile",
           workerType: "coder-acp-copilot",
@@ -90,8 +104,8 @@ describe("Profile API Endpoints", () => {
         ref: "github/org/my-skill@abc1234",
       });
 
-      const res = await request(app)
-        .post("/api/v1/profiles")
+      const res = await request(testServer())
+        .post(`/api/v1/profiles?projectId=${TEST_PROJECT_ID}`)
         .send({
           name: "With Skills",
           workerType: "coder-acp-copilot",
@@ -121,8 +135,8 @@ describe("Profile API Endpoints", () => {
         commitHash: "abc1234",
       });
 
-      const res = await request(app)
-        .post("/api/v1/profiles")
+      const res = await request(testServer())
+        .post(`/api/v1/profiles?projectId=${TEST_PROJECT_ID}`)
         .send({
           name: "Pinned Skills",
           workerType: "coder-acp-copilot",
@@ -132,13 +146,13 @@ describe("Profile API Endpoints", () => {
 
       expect(res.status).toBe(201);
       expect(res.body.version.skillRevisions).toEqual(["github/org/my-skill@abc1234"]);
-      expect(mocks.skillRevisionStore.getByRef).toHaveBeenCalledWith("github/org/my-skill@abc1234");
+      expect(mocks.skillRevisionStore.getByRef).toHaveBeenCalledWith(TEST_PROJECT_ID, "github/org/my-skill@abc1234");
       expect(mocks.skillResolver.resolve).not.toHaveBeenCalled();
     });
 
     it("rejects missing name", async () => {
-      const res = await request(app)
-        .post("/api/v1/profiles")
+      const res = await request(testServer())
+        .post(`/api/v1/profiles?projectId=${TEST_PROJECT_ID}`)
         .send({
           workerType: "coder-acp-copilot",
           model: "gpt-4o",
@@ -148,8 +162,8 @@ describe("Profile API Endpoints", () => {
     });
 
     it("rejects missing model", async () => {
-      const res = await request(app)
-        .post("/api/v1/profiles")
+      const res = await request(testServer())
+        .post(`/api/v1/profiles?projectId=${TEST_PROJECT_ID}`)
         .send({
           name: "No Model",
           workerType: "coder-acp-copilot",
@@ -158,9 +172,9 @@ describe("Profile API Endpoints", () => {
       expect(res.status).toBe(400);
     });
 
-    it("rejects extensions on non-vscode worker", async () => {
-      const res = await request(app)
-        .post("/api/v1/profiles")
+    it("allows capability mismatches while strict enforcement is disabled", async () => {
+      const res = await request(testServer())
+        .post(`/api/v1/profiles?projectId=${TEST_PROJECT_ID}`)
         .send({
           name: "Bad Combo",
           workerType: "coder-acp-copilot",
@@ -168,13 +182,13 @@ describe("Profile API Endpoints", () => {
           extensions: ["ms-azuretools.vscode-cosmosdb@0.32.1"],
         });
 
-      expect(res.status).toBe(400);
-      expect(res.body.error).toContain("does not support VS Code extensions");
+      expect(res.status).toBe(201);
+      expect(res.body.version.agentVersion).toBe("v1");
     });
   });
 
   describe("POST /api/v1/profiles/:profileId (new version)", () => {
-    it("rejects extensions on non-vscode worker", async () => {
+    it("allows capability mismatches while strict enforcement is disabled", async () => {
       const profileCol = mocks.profileCollection as any;
       profileCol.findOne = vi.fn().mockResolvedValue({
         _id: "p-1",
@@ -183,7 +197,7 @@ describe("Profile API Endpoints", () => {
         createdAt: new Date(),
       });
 
-      const res = await request(app)
+      const res = await request(testServer())
         .post("/api/v1/profiles/p-1")
         .send({
           workerType: "coder-acp-copilot",
@@ -191,8 +205,8 @@ describe("Profile API Endpoints", () => {
           extensions: ["ms-azuretools.vscode-cosmosdb@0.32.1"],
         });
 
-      expect(res.status).toBe(400);
-      expect(res.body.error).toContain("does not support VS Code extensions");
+      expect(res.status).toBe(201);
+      expect(res.body.agentVersion).toBe("v1");
     });
   });
 
@@ -218,7 +232,7 @@ describe("Profile API Endpoints", () => {
         createdAt: new Date(),
       });
 
-      const res = await request(app).get("/api/v1/profiles");
+      const res = await request(testServer()).get(`/api/v1/profiles?projectId=${TEST_PROJECT_ID}`);
 
       expect(res.status).toBe(200);
       expect(Array.isArray(res.body)).toBe(true);
@@ -233,7 +247,7 @@ describe("Profile API Endpoints", () => {
       const profileCol = mocks.profileCollection as any;
       profileCol.findOne = vi.fn().mockResolvedValue(null);
 
-      const res = await request(app).get("/api/v1/profiles/nonexistent");
+      const res = await request(testServer()).get("/api/v1/profiles/nonexistent");
 
       expect(res.status).toBe(404);
     });
@@ -257,7 +271,7 @@ describe("Profile API Endpoints", () => {
         createdAt: new Date(),
       });
 
-      const res = await request(app).get("/api/v1/profiles/p-1");
+      const res = await request(testServer()).get("/api/v1/profiles/p-1");
 
       expect(res.status).toBe(200);
       expect(res.body).toHaveProperty("name", "My Profile");
@@ -277,7 +291,7 @@ describe("Profile API Endpoints", () => {
       });
       profileCol.updateOne = vi.fn().mockResolvedValue({ matchedCount: 1 });
 
-      const res = await request(app).delete("/api/v1/profiles/p-1");
+      const res = await request(testServer()).delete("/api/v1/profiles/p-1");
 
       expect(res.status).toBe(204);
       expect(profileCol.updateOne).toHaveBeenCalledOnce();
@@ -287,7 +301,7 @@ describe("Profile API Endpoints", () => {
       const profileCol = mocks.profileCollection as any;
       profileCol.findOne = vi.fn().mockResolvedValue(null);
 
-      const res = await request(app).delete("/api/v1/profiles/nonexistent");
+      const res = await request(testServer()).delete("/api/v1/profiles/nonexistent");
 
       expect(res.status).toBe(404);
     });
@@ -314,7 +328,7 @@ describe("Profile API Endpoints", () => {
         }),
       });
 
-      const res = await request(app).get("/api/v1/profiles/p-1/versions");
+      const res = await request(testServer()).get("/api/v1/profiles/p-1/versions");
 
       expect(res.status).toBe(200);
       expect(Array.isArray(res.body)).toBe(true);

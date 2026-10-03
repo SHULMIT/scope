@@ -143,6 +143,7 @@ describe("InsightDocument", () => {
   it("supports all required fields", () => {
     const insight: InsightDocument = {
       _id: "abc-123",
+      projectId: "proj-test",
       title: "Agent retries same approach despite failure",
       description: "## Observation\nThe agent repeatedly attempts the same fix.",
       upvotes: 3,
@@ -165,6 +166,7 @@ describe("InsightDocument", () => {
   it("supports optional fields", () => {
     const insight: InsightDocument = {
       _id: "def-456",
+      projectId: "proj-test",
       title: "Scenario criteria too vague",
       description: "Details here",
       category: "scenario-design",
@@ -189,6 +191,7 @@ describe("InsightDocument", () => {
   it("allows createdBy to be agent or user", () => {
     const agentInsight: InsightDocument = {
       _id: "1",
+      projectId: "proj-test",
       title: "t",
       description: "d",
       upvotes: 0,

@@ -17,7 +17,7 @@ describe('SkillClient', () => {
   });
 
   it('returns empty array for no refs', async () => {
-    const result = await client.resolveSkills([]);
+    const result = await client.resolveSkills('proj-1', []);
     expect(result).toEqual([]);
     expect(mockFetch).not.toHaveBeenCalled();
   });
@@ -39,7 +39,7 @@ describe('SkillClient', () => {
       }),
     });
 
-    const result = await client.resolveSkills(['owner/repo/skill@abc1234']);
+    const result = await client.resolveSkills('proj-1', ['owner/repo/skill@abc1234']);
 
     expect(result).toHaveLength(1);
     expect(result[0]).toEqual({
@@ -49,7 +49,7 @@ describe('SkillClient', () => {
       content: '# SKILL.md content',
     });
     expect(mockFetch).toHaveBeenCalledWith(
-      'http://localhost:3100/api/v1/skill-revisions/by-ref/owner%2Frepo%2Fskill%40abc1234'
+      'http://localhost:3100/api/v1/skill-revisions/by-ref/owner%2Frepo%2Fskill%40abc1234?projectId=proj-1'
     );
   });
 
@@ -71,7 +71,7 @@ describe('SkillClient', () => {
       });
     }
 
-    const result = await client.resolveSkills(['ref-A', 'ref-B']);
+    const result = await client.resolveSkills('proj-1', ['ref-A', 'ref-B']);
     expect(result).toHaveLength(2);
     expect(result[0].name).toBe('Skill A');
     expect(result[1].name).toBe('Skill B');
@@ -83,7 +83,7 @@ describe('SkillClient', () => {
       status: 404,
     });
 
-    await expect(client.resolveSkills(['missing/ref@abc']))
+    await expect(client.resolveSkills('proj-1', ['missing/ref@abc']))
       .rejects.toThrow("Skill revision 'missing/ref@abc' not found via API");
   });
 
@@ -94,7 +94,7 @@ describe('SkillClient', () => {
       statusText: 'Internal Server Error',
     });
 
-    await expect(client.resolveSkills(['some/ref@abc']))
+    await expect(client.resolveSkills('proj-1', ['some/ref@abc']))
       .rejects.toThrow('failed: 500 Internal Server Error');
   });
 
@@ -109,7 +109,7 @@ describe('SkillClient', () => {
       }),
     });
 
-    await c.resolveSkills(['ref']);
+    await c.resolveSkills('proj-1', ['ref']);
     expect(mockFetch).toHaveBeenCalledWith(
       expect.stringContaining('http://localhost:3100/api/v1/')
     );
@@ -124,13 +124,13 @@ describe('SkillClient', () => {
         arrayBuffer: async () => archiveData.buffer,
       });
 
-      const result = await client.downloadSkillArchive('owner/repo/skill@abc1234');
+      const result = await client.downloadSkillArchive('proj-1', 'owner/repo/skill@abc1234');
 
       expect(Buffer.isBuffer(result)).toBe(true);
       expect(result.length).toBe(4);
       expect(result[0]).toBe(0x1f);
       expect(mockFetch).toHaveBeenCalledWith(
-        'http://localhost:3100/api/v1/skill-revisions/by-ref/owner%2Frepo%2Fskill%40abc1234/archive'
+        'http://localhost:3100/api/v1/skill-revisions/by-ref/owner%2Frepo%2Fskill%40abc1234/archive?projectId=proj-1'
       );
     });
 
@@ -140,7 +140,7 @@ describe('SkillClient', () => {
         status: 404,
       });
 
-      await expect(client.downloadSkillArchive('missing/ref@abc'))
+      await expect(client.downloadSkillArchive('proj-1', 'missing/ref@abc'))
         .rejects.toThrow("Skill archive for 'missing/ref@abc' not found via API");
     });
 
@@ -151,7 +151,7 @@ describe('SkillClient', () => {
         statusText: 'Internal Server Error',
       });
 
-      await expect(client.downloadSkillArchive('some/ref@abc'))
+      await expect(client.downloadSkillArchive('proj-1', 'some/ref@abc'))
         .rejects.toThrow('failed: 500 Internal Server Error');
     });
   });

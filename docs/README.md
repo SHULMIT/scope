@@ -9,8 +9,10 @@ Central documentation hub for the Scope platform — an AI coding agent benchmar
 | [System Overview](architecture/overview.md) | High-level architecture, component interactions, data flow |
 | [Architecture Layers](architecture/architecture-layers.md) | 5-layer responsibility model — from cloud foundation to app workloads |
 | [Application Design](architecture/app-design.md) | Data models, API design, judge pipeline, queue patterns, criteria system |
+| [Prompt Evaluations](architecture/prompt-evaluations.md) | Static prompt quality, user-controlled surface red teaming, datasets, commands, and maintenance |
 | [VS Code Web Worker](architecture/vscode-web-worker.md) | XState chat machine, GitHub auth flow, ARIA snapshots, AI dev loop |
 | [Token Manager](architecture/token-manager.md) | Capability-based token management, validation, round-robin distribution |
+| [Authentication & RBAC](architecture/auth-rbac.md) | Explicit-login IdP authentication, Redis user-access caching, Portal handshake; deferred RBAC roadmap |
 | [Worker Requirements](architecture/worker-requirements.md) | Requirements checklist for coding agent workers |
 | [Worker Compliance](architecture/worker-compliance.md) | Per-worker compliance matrix against requirements |
 | [Database Migrations](architecture/db-migrations.md) | Lightweight MongoDB migration framework, writing and running migrations |
@@ -23,6 +25,18 @@ Central documentation hub for the Scope platform — an AI coding agent benchmar
 |----------|-------------|
 | [AKS Node Pool Separation](infrastructure/aks-node-pool-separation.md) | Taints, tolerations, node selectors for workload isolation |
 | [Azure Developer CLI](infrastructure/azd-deployment.md) | Provisioning with `azd up`, feature flags, environment variables |
+
+## Responsible AI
+
+| Document | Description |
+|----------|-------------|
+| [Responsible AI FAQ](responsible-ai-faq.md) | Intended uses, limitations, AI capabilities, risks and mitigations for the OneRAI transparency documentation |
+
+## Operations
+
+| Document | Description |
+|----------|-------------|
+| [Cosmos DB Backup & Restore](ops/cosmos-backup-restore.md) | `pnpm db:dump` / `pnpm db:restore` rollback tooling, presets, verification, Cosmos caveats |
 
 ## Research
 
@@ -50,7 +64,6 @@ Architecture Decision Records (ADRs) capture significant design choices and thei
 
 - **Sub-project READMEs** — Quick-start and setup guides:
   - [`scope-mt-app/README.md`](../scope-mt-app/README.md) — Application setup, Docker Compose, features
-  - [`scope-mt-deploy/README.md`](../scope-mt-deploy/README.md) — FluxCD manifest structure
   - [`scope-mt-infra/README.md`](../scope-mt-infra/README.md) — Azure infrastructure overview
 - **[`scope-mt-app/ENV_VARIABLES.md`](../scope-mt-app/ENV_VARIABLES.md)** — Environment variable reference for the criteria/judge system
 - **[`scope-mt-app/config/`](../scope-mt-app/config/)** — Domain knowledge encoded as YAML (scenarios, personas, criteria, traits)

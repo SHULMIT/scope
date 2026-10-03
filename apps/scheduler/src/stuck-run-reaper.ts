@@ -4,6 +4,7 @@
 import { Collection } from "mongodb";
 import type { HeartbeatStore, RequestDocument } from "shared";
 import { durationSetFields } from "shared";
+import { trackMetric, trackEvent } from "telemetry";
 
 /**
  * StuckRunReaper — authoritative backstop that fails runs permanently stuck
@@ -144,6 +145,8 @@ export class StuckRunReaper {
   async sweep(): Promise<void> {
     if (this.sweeping || this.closing) return;
     this.sweeping = true;
+    const sweepStart = Date.now();
+    let reaped = 0;
     try {
       // Redis-outage guard: if the heartbeat store is unreachable, a missing
       // heartbeat is meaningless (mget would return empty). Skip the sweep
@@ -230,12 +233,17 @@ export class StuckRunReaper {
 
       for (const c of toReap) {
         if (this.closing) break;
-        await this.reapOne(c, now);
+        const wasReaped = await this.reapOne(c, now);
+        if (wasReaped) reaped++;
       }
     } catch (err) {
       console.error("[StuckRunReaper] Error during sweep:", err);
     } finally {
       this.sweeping = false;
+      trackMetric({ name: "scheduler.reaper_sweep_ms", value: Date.now() - sweepStart, properties: { service: "scheduler" } });
+      if (reaped > 0) {
+        trackMetric({ name: "scheduler.reaper_runs_failed", value: reaped, properties: { service: "scheduler" } });
+      }
     }
   }
 
@@ -294,7 +302,7 @@ export class StuckRunReaper {
     return out;
   }
 
-  private async reapOne(c: Candidate, now: number): Promise<void> {
+  private async reapOne(c: Candidate, now: number): Promise<boolean> {
     // Confirmation re-read (issue #1064): a single-key GET is always
     // shard-routable, so a fresh beat here means the worker is alive — abort the
     // reap regardless of why the batch read under-reported it.
@@ -306,7 +314,7 @@ export class StuckRunReaper {
           `read under-reported liveness (likely a cross-slot MGET failure on clustered Redis); not reaping.`,
       );
       this.previouslyStale.delete(c.runId);
-      return;
+      return false;
     }
 
     const ageDesc = c.startedAt
@@ -356,10 +364,12 @@ export class StuckRunReaper {
       await this.heartbeatStore.delete(c.runId);
       // Don't try to reap this id again next sweep.
       this.previouslyStale.delete(c.runId);
+      return true;
     } else {
       console.log(
         `[StuckRunReaper] Skipped ${c._id} (runId=${c.runId}) — ownership/status changed concurrently`,
       );
+      return false;
     }
   }
 }

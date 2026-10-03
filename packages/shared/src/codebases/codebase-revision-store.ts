@@ -16,7 +16,7 @@ import {
  */
 export type CreateCodebaseRevisionInput = Omit<
   CodebaseRevisionDocument,
-  "_id" | "revisionNumber" | "ref" | "createdAt"
+  "_id" | "revisionNumber" | "ref" | "createdAt" | "projectId"
 >;
 
 /**
@@ -101,6 +101,12 @@ export class CodebaseRevisionStore {
     input: CreateCodebaseRevisionInput,
     opts?: { id?: string }
   ): Promise<CodebaseRevisionDocument> {
+    // Derive the project scope from the parent codebase (child entities copy
+    // their parent's projectId — they are never passed one directly).
+    const codebase = await this.codebaseStore.get(input.codebaseId);
+    if (!codebase) {
+      throw new Error(`Codebase '${input.codebaseId}' not found — cannot create revision`);
+    }
     const revisionNumber = await this.codebaseStore.allocateRevisionNumber(
       input.codebaseId
     );
@@ -111,6 +117,7 @@ export class CodebaseRevisionStore {
     const doc: CodebaseRevisionDocument = {
       ...input,
       _id: opts?.id ?? randomUUID(),
+      projectId: codebase.projectId,
       revisionNumber,
       ref: buildCodebaseRevisionRef(input.slug, revisionNumber),
       createdAt: new Date(),

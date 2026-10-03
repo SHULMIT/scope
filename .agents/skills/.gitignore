@@ -9,8 +9,6 @@
 !storybook/**
 !scope-api/
 !scope-api/**
-!release-notes/
-!release-notes/**
 !resilience/
 !resilience/**
 !typescript/
@@ -19,7 +17,5 @@
 !cosmosdb-mongodb/**
 !documentation/
 !documentation/**
-!service-deployment/
-!service-deployment/**
 !vscode-electron-worker/
 !vscode-electron-worker/**

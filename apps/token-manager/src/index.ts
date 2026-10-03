@@ -12,8 +12,10 @@ import { createAccountRouter } from "./account-routes.js";
 import { createMcpSecretRouter } from "./mcp-secret-routes.js";
 import { startTokenScheduler } from "./token-scheduler.js";
 import { validateToken } from "./token-validators.js";
+import { initTelemetry, trackMetric, trackEvent, shutdownTelemetry } from "telemetry";
 
 dotenv.config();
+initTelemetry("scope-token-manager");
 
 const port = parseInt(process.env.PORT || "3000", 10);
 const mongoUri = process.env.MONGO_CONNECTION_STRING || "mongodb://localhost:27000";
@@ -79,11 +81,16 @@ async function initializeClients(): Promise<void> {
   app.use(accountRouter);
 
   // Mount MCP secret routes
-  // Create unique index on { mcpId, name } to enforce no duplicate secret names per server
+  // Backfill projectId on legacy secrets (from their server's projectId) BEFORE creating
+  // the { projectId, mcpId, name } unique index, so pre-feature secrets are project-scoped.
+  await backfillSecretProjectIds(mcpSecretsCollection, mcpServerCollection);
+
+  // Create unique index on { projectId, mcpId, name } to enforce no duplicate secret
+  // names per server per project (server slugs are reused across projects).
   try {
-    await mcpSecretsCollection.createIndex({ mcpId: 1, name: 1 }, { unique: true });
+    await mcpSecretsCollection.createIndex({ projectId: 1, mcpId: 1, name: 1 }, { unique: true });
   } catch (err) {
-    console.log("[token-manager] Index mcp-secrets mcpId/name may already exist");
+    console.log("[token-manager] Index mcp-secrets projectId/mcpId/name may already exist");
   }
   const mcpSecretRouter = createMcpSecretRouter(mcpSecretsCollection, mcpServerCollection, secretStore);
   app.use(mcpSecretRouter);
@@ -97,14 +104,54 @@ async function initializeClients(): Promise<void> {
   });
 
   // Graceful shutdown
-  const shutdownHandler = () => {
+  const shutdownHandler = async () => {
     console.log("[token-manager] Shutdown signal received, stopping scheduler...");
     scheduler.stop();
     client.close();
+    await shutdownTelemetry();
     process.exit(0);
   };
   process.on("SIGTERM", shutdownHandler);
   process.on("SIGINT", shutdownHandler);
+}
+
+/**
+ * One-off startup backfill: assign `projectId` to legacy MCP secrets that predate the
+ * per-project scoping change. Each secret references its server by slug (`mcpId`), and every
+ * server carries a `projectId` (migration 025), so we derive the secret's project from its
+ * server. Server slugs were globally unique before the Projects feature, making the mapping
+ * unambiguous. Idempotent: only touches docs missing `projectId`.
+ */
+async function backfillSecretProjectIds(
+  secretsCollection: Collection<McpSecretDocument>,
+  mcpServerCollection: Collection<McpServerDocument>,
+): Promise<void> {
+  const legacy = await secretsCollection.find({ projectId: { $exists: false } } as any).toArray();
+  if (legacy.length === 0) return;
+
+  console.log(`[token-manager] Backfilling projectId on ${legacy.length} legacy MCP secret(s)...`);
+  let updated = 0;
+  let orphaned = 0;
+  const projectIdByMcpId = new Map<string, string | null>();
+
+  for (const secret of legacy) {
+    if (!projectIdByMcpId.has(secret.mcpId)) {
+      // Resolve the server by its post-027 slug field, falling back to _id for pre-migration rows.
+      const server = await mcpServerCollection.findOne({
+        $or: [{ slug: secret.mcpId }, { _id: secret.mcpId }],
+      });
+      projectIdByMcpId.set(secret.mcpId, server?.projectId ?? null);
+    }
+    const projectId = projectIdByMcpId.get(secret.mcpId) ?? null;
+    if (!projectId) {
+      orphaned++;
+      continue;
+    }
+    await secretsCollection.updateOne({ _id: secret._id as any }, { $set: { projectId } });
+    updated++;
+  }
+
+  console.log(`[token-manager] Secret projectId backfill complete: ${updated} updated, ${orphaned} orphaned (no matching server).`);
 }
 
 // Error handler
@@ -121,9 +168,12 @@ app.use(
 );
 
 async function main(): Promise<void> {
+  const coldStartMs = process.uptime() * 1000;
   await initializeClients();
   app.listen(port, () => {
     console.log(`[token-manager] listening on port ${port}`);
+    trackMetric({ name: "token_manager.cold_start_ms", value: coldStartMs, properties: { service: "token-manager" } });
+    trackEvent({ name: "token_manager.service_started", properties: {} });
   });
 }
 

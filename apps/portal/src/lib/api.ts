@@ -1,14 +1,73 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import type { Run, RunState, CriteriaDocument, CriteriaGraphData, GeneratePromptResponse, AnalysisResponse, PromptFeatureDocument, Report, BulkReportStatus, BulkReportSummary, ReportTemplate, ReportTrigger, ReportTemplateSystemPrompt, KeyDocument, KeyValidationResult, CreateKeyRequest, UpdateKeyRequest, CodingAgent, AgentVersion, McpServerDocument, CreateMcpServerRequest, UpdateMcpServerRequest, BulkResubmitOverrides, Insight, InsightWithReference, TaskPrompt, TaskPromptFeatureExtractionResult, Model, FeatureFlag, SkillDocument, SkillSearchResult, SkillDiscoveryResult, SkillRevisionDocument, CodebaseDocument, CodebaseRevisionDocument, CodebaseSourceType, ExtensionDocument, ExtensionSearchResult, ExtensionVersionInfo, MdpResponse, AccountDocument, CreateAccountRequest, UpdateAccountRequest, ProfileWithVersion, ProfileVersionDocument, ProfileDocument, RunGroup, RunFacetsResponse, CursorPaginatedResponse, IterationOp, GateConfig, GateId, PromptType, RunSortField, RunSortDir } from "@/types";
+import type { Run, RunState, CriteriaDocument, CriteriaGraphData, GeneratePromptResponse, AnalysisResponse, PromptFeatureDocument, Report, BulkReportStatus, BulkReportSummary, ReportTemplate, ReportTrigger, ReportTemplateSystemPrompt, KeyDocument, KeyValidationResult, CreateKeyRequest, UpdateKeyRequest, CodingAgent, AgentVersion, McpServerDocument, CreateMcpServerRequest, UpdateMcpServerRequest, BulkResubmitOverrides, Insight, InsightWithReference, TaskPrompt, TaskPromptFeatureExtractionResult, Model, FeatureFlag, SkillDocument, SkillSearchResult, SkillDiscoveryResult, SkillRevisionDocument, CodebaseDocument, CodebaseRevisionDocument, CodebaseSourceType, ResourceDocument, ResourceRevisionDocument, ResourceBindingSpec, CreateResourceBody, CreateResourceRevisionBody, ExtensionDocument, ExtensionSearchResult, ExtensionVersionInfo, MdpResponse, AccountDocument, CreateAccountRequest, UpdateAccountRequest, ProfileWithVersion, ProfileVersionDocument, ProfileDocument, RunGroup, RunFacetsResponse, CursorPaginatedResponse, IterationOp, GateConfig, GateId, PromptType, RunSortField, RunSortDir } from "@/types";
 
+import type { Project, CreateProjectRequest, UpdateProjectRequest } from "@/types";
 import { qs } from "./url";
 import { recordServerDate } from "./serverClock";
 import { apiClient } from "./api-client";
+import { getSelectedProjectId, ProjectRequiredError } from "./project-scope";
 import { MAX_ARCHIVE_UPLOAD_LABEL } from "./codebaseUpload";
 
 const BASE = "/api/v1";
+
+/** Browser-safe response from the Scope identity endpoint (not IdP claims). */
+export interface CurrentUserResponse {
+  id: string;
+  role?: string;
+  email?: string;
+  displayName?: string;
+  idp?: string;
+  idpTenant?: string;
+}
+
+export class ApiError extends Error {
+  constructor(message: string, public readonly status: number, public readonly code?: string) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+function validateCurrentUser(value: unknown): CurrentUserResponse {
+  if (
+    !value || typeof value !== "object" ||
+    !("id" in value) || typeof value.id !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.id) ||
+    value.id === "00000000-0000-0000-0000-000000000000" ||
+    ["role", "email", "displayName", "idp", "idpTenant"].some(
+      (key) => key in value && typeof (value as Record<string, unknown>)[key] !== "string",
+    )
+  ) {
+    throw new Error("Invalid user response from Scope");
+  }
+  return value as CurrentUserResponse;
+}
+
+/**
+ * Append `projectId=<id>` to an already-built request path, choosing `?` vs `&`
+ * based on whether the path already carries a query string. Mirrors the CLI
+ * client's `withProjectId` helper (`apps/cli/src/utils/api-client.ts`) so the
+ * two surfaces scope requests identically.
+ */
+function withProjectId(path: string, projectId: string): string {
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}projectId=${encodeURIComponent(projectId)}`;
+}
+
+/** Extra options controlling how {@link request} builds the call. */
+interface RequestOpts {
+  /**
+   * When `true`, this is a **project-scoped** call: the currently selected
+   * project's id (read from the module-level holder in `project-scope.ts`) is
+   * appended as `?projectId=`. If no project is selected, a
+   * {@link ProjectRequiredError} is thrown instead of firing an unscoped
+   * request — there is **no default project**. Point reads (by `_id`), nested
+   * lists (derived from a parent in the path) and unscoped resource families
+   * (agents, models, secrets, projects) omit this.
+   */
+  scoped?: boolean;
+}
 
 /**
  * Categorical + range filter params shared by the Runs list, grouped list, and
@@ -60,8 +119,14 @@ function runFilterQs(f: RunFilterParams): Record<string, string | string[] | und
   };
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await apiClient(`${BASE}${path}`, {
+async function request<T>(path: string, init?: RequestInit, opts?: RequestOpts): Promise<T> {
+  let finalPath = path;
+  if (opts?.scoped) {
+    const projectId = getSelectedProjectId();
+    if (!projectId) throw new ProjectRequiredError();
+    finalPath = withProjectId(path, projectId);
+  }
+  const res = await apiClient(`${BASE}${finalPath}`, {
     headers: { "Content-Type": "application/json" },
     ...init,
   });
@@ -69,19 +134,37 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   // relative-time displays survive a misconfigured local clock.
   recordServerDate(res.headers.get("Date"));
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText })) as { error?: string; details?: Array<{ path: string; message: string }> };
+    const body = await res.json().catch(() => ({ error: res.statusText })) as { error?: string; code?: string; details?: Array<{ path: string; message: string }> };
     const message = body.error || `HTTP ${res.status}`;
     const details = body.details;
     if (details?.length) {
-      throw new Error(`${message}: ${details.map((d) => `${d.path || "body"}: ${d.message}`).join(", ")}`);
+      throw new ApiError(`${message}: ${details.map((d) => `${d.path || "body"}: ${d.message}`).join(", ")}`, res.status, body.code);
     }
-    throw new Error(message);
+    throw new ApiError(message, res.status, body.code);
   }
   if (res.status === 204) return undefined as T;
   return res.json();
 }
 
+async function requestCurrentUser(
+  method: "GET" | "POST",
+  opts: { signal?: AbortSignal } = {},
+): Promise<CurrentUserResponse> {
+  const user = await request<unknown>("/users/me", {
+    method,
+    cache: "no-store",
+    signal: opts.signal,
+  });
+  return validateCurrentUser(user);
+}
+
 export const api = {
+  /** Only AuthProvider calls these; enrollment must never be prefetched. */
+  getCurrentUser: (opts: { signal?: AbortSignal } = {}): Promise<CurrentUserResponse> =>
+    requestCurrentUser("GET", opts),
+  enrollCurrentUser: (opts: { signal?: AbortSignal } = {}): Promise<CurrentUserResponse> =>
+    requestCurrentUser("POST", opts),
+
   /** List runs with cursor-based pagination, server-side filtering and sorting */
   listRuns: (opts?: RunFilterParams & { sortBy?: RunSortField; sortDir?: RunSortDir; limit?: number; after?: string; before?: string; last?: boolean }): Promise<CursorPaginatedResponse<Run>> => {
     return request(`/requests${qs({
@@ -92,7 +175,7 @@ export const api = {
       after: opts?.after,
       before: opts?.before,
       last: opts?.last ? "true" : undefined,
-    })}`);
+    })}`, undefined, { scoped: true });
   },
 
   /** List runs grouped by task/profile/submissionId, with cursor pagination and server-side filtering */
@@ -106,7 +189,7 @@ export const api = {
       after: opts.after,
       before: opts.before,
       last: opts.last ? "true" : undefined,
-    })}`);
+    })}`, undefined, { scoped: true });
   },
 
   /**
@@ -117,7 +200,7 @@ export const api = {
    * response is shared (one query key) and cached server-side for a short TTL.
    */
   listRunFacets: (): Promise<RunFacetsResponse> => {
-    return request(`/requests/facets`);
+    return request(`/requests/facets`, undefined, { scoped: true });
   },
 
   /** Get a single run by ID */
@@ -138,6 +221,7 @@ export const api = {
     mcpServers?: string[];
     skills?: string[];
     extensions?: string[];
+    resources?: ResourceBindingSpec[];
     agentVersion?: string;
     profileId?: string;
     profileVariations?: string[];
@@ -152,7 +236,7 @@ export const api = {
     return request(url, {
       method: "POST",
       body: JSON.stringify(payload),
-    });
+    }, { scoped: true });
   },
 
   /** Soft-delete a run */
@@ -357,12 +441,12 @@ export const api = {
     if (opts?.ids && opts.ids.length > 0) params.set("ids", opts.ids.join(","));
     if (opts?.ancestors) params.set("ancestors", "true");
     const qs = params.toString();
-    return request(`/criteria${qs ? `?${qs}` : ""}`);
+    return request(`/criteria${qs ? `?${qs}` : ""}`, undefined, { scoped: true });
   },
 
-  /** Get a single criterion by ID */
+  /** Get a single criterion by ID (soft-scoped: prefers the active project's copy, else legacy global) */
   getCriterion: (id: string): Promise<CriteriaDocument & { dependents: string[] }> => {
-    return request(`/criteria/${id}`);
+    return request(`/criteria/${id}`, undefined, { scoped: true });
   },
 
   /** Create a new criterion */
@@ -370,33 +454,40 @@ export const api = {
     return request("/criteria", {
       method: "POST",
       body: JSON.stringify(body),
-    });
+    }, { scoped: true });
   },
 
-  /** Update an existing criterion */
+  /** Update an existing criterion (soft-scoped: prefers the active project's copy, else legacy global) */
   updateCriterion: (id: string, body: { prompt?: string; dependsOn?: string[]; gates?: GateId[] }): Promise<CriteriaDocument> => {
     return request(`/criteria/${id}`, {
       method: "PUT",
       body: JSON.stringify(body),
-    });
+    }, { scoped: true });
   },
 
-  /** Delete a criterion */
+  /** Delete a criterion (soft-scoped: prefers the active project's copy, else legacy global) */
   deleteCriterion: (id: string): Promise<{ id: string; deleted: boolean }> => {
-    return request(`/criteria/${id}`, { method: "DELETE" });
+    return request(`/criteria/${id}`, { method: "DELETE" }, { scoped: true });
   },
 
   /** Get the full criteria dependency graph */
   getCriteriaGraph: (): Promise<CriteriaGraphData> => {
-    return request("/criteria/graph");
+    return request("/criteria/graph", undefined, { scoped: true });
   },
 
-  /** Generate a criteria prompt from a behavior description using AI */
+  /**
+   * Generate a criteria prompt from a behavior description using AI.
+   *
+   * Scoped: the server derives its **parent/child suggestion pool** from the
+   * existing criteria filtered by `?projectId=`, so the suggested parents and
+   * children stay within the active project (never leak criteria from other
+   * projects). Matches the project scoping of the manual `listCriteria` picker.
+   */
   generateCriteriaPrompt: (behavior: string, currentId?: string, gates?: string[]): Promise<GeneratePromptResponse> => {
     return request("/criteria/generate-prompt", {
       method: "POST",
       body: JSON.stringify({ behavior, ...(currentId && { currentId }), ...(gates && gates.length > 0 && { gates }) }),
-    });
+    }, { scoped: true });
   },
 
   // ─── Prompt Features ───────────────────────────────────────────────────────
@@ -407,12 +498,12 @@ export const api = {
     if (q) params.set("q", q);
     if (type) params.set("type", type);
     const qs = params.toString();
-    return request(`/prompt-features${qs ? `?${qs}` : ""}`);
+    return request(`/prompt-features${qs ? `?${qs}` : ""}`, undefined, { scoped: true });
   },
 
-  /** Get a single prompt feature by ID */
+  /** Get a single prompt feature by ID (soft-scoped: prefers the active project's copy, else legacy global) */
   getPromptFeature: (id: string): Promise<PromptFeatureDocument & { dependents: string[] }> => {
-    return request(`/prompt-features/${id}`);
+    return request(`/prompt-features/${id}`, undefined, { scoped: true });
   },
 
   /** Create a new prompt feature */
@@ -420,20 +511,20 @@ export const api = {
     return request("/prompt-features", {
       method: "POST",
       body: JSON.stringify(body),
-    });
+    }, { scoped: true });
   },
 
-  /** Update an existing prompt feature */
+  /** Update an existing prompt feature (soft-scoped: prefers the active project's copy, else legacy global) */
   updatePromptFeature: (id: string, body: { prompt?: string }): Promise<PromptFeatureDocument> => {
     return request(`/prompt-features/${id}`, {
       method: "PUT",
       body: JSON.stringify(body),
-    });
+    }, { scoped: true });
   },
 
-  /** Delete a prompt feature */
+  /** Delete a prompt feature (soft-scoped: prefers the active project's copy, else legacy global) */
   deletePromptFeature: (id: string): Promise<{ id: string; deleted: boolean }> => {
-    return request(`/prompt-features/${id}`, { method: "DELETE" });
+    return request(`/prompt-features/${id}`, { method: "DELETE" }, { scoped: true });
   },
 
   /** Generate a prompt feature prompt from a behavior description using AI */
@@ -454,7 +545,7 @@ export const api = {
     if (opts?.search) params.set("search", opts.search);
     if (opts?.type) params.set("type", opts.type);
     const qs = params.toString();
-    return request(`/task-prompts${qs ? `?${qs}` : ""}`);
+    return request(`/task-prompts${qs ? `?${qs}` : ""}`, undefined, { scoped: true });
   },
 
   /** Get a single task prompt by ID */
@@ -472,7 +563,7 @@ export const api = {
     return request("/task-prompts", {
       method: "POST",
       body: JSON.stringify({ text, ...(type ? { type } : {}) }),
-    });
+    }, { scoped: true });
   },
 
   /** Soft-delete a task prompt */
@@ -515,14 +606,18 @@ export const api = {
 
   // ─── Agents ─────────────────────────────────────────────────────────────────
 
-  /** List all coding agents */
-  listAgents: (): Promise<CodingAgent[]> => {
-    return request("/agents");
+  /** List coding agents, optionally including soft-deleted historical records. */
+  listAgents: (options?: { includeDeleted?: boolean }): Promise<CodingAgent[]> => {
+    const params = new URLSearchParams();
+    if (options?.includeDeleted) params.set("includeDeleted", "true");
+    const query = params.size > 0 ? `?${params.toString()}` : "";
+    return request(`/agents${query}`);
   },
 
-  /** Get a single coding agent by ID */
-  getAgent: (id: string): Promise<CodingAgent> => {
-    return request(`/agents/${encodeURIComponent(id)}`);
+  /** Get a single coding agent by ID, optionally including a soft-deleted record. */
+  getAgent: (id: string, options?: { includeDeleted?: boolean }): Promise<CodingAgent> => {
+    const query = options?.includeDeleted ? "?includeDeleted=true" : "";
+    return request(`/agents/${encodeURIComponent(id)}${query}`);
   },
 
   /** Update a coding agent */
@@ -556,33 +651,33 @@ export const api = {
 
   /** List all MCP servers */
   listMcpServers: (): Promise<McpServerDocument[]> => {
-    return request("/mcp/servers");
+    return request("/mcp/servers", undefined, { scoped: true });
   },
 
-  /** Get a single MCP server by slug */
+  /** Get a single MCP server by slug (soft-scoped: prefers the active project's copy, else legacy global) */
   getMcpServer: (slug: string): Promise<McpServerDocument> => {
-    return request(`/mcp/servers/${encodeURIComponent(slug)}`);
+    return request(`/mcp/servers/${encodeURIComponent(slug)}`, undefined, { scoped: true });
   },
 
-  /** Create a new MCP server (upsert by slug) */
+  /** Create a new MCP server (409s if the slug already exists in the active project) */
   createMcpServer: (body: CreateMcpServerRequest): Promise<McpServerDocument> => {
     return request("/mcp/servers", {
       method: "POST",
       body: JSON.stringify(body),
-    });
+    }, { scoped: true });
   },
 
-  /** Update an MCP server */
+  /** Update an MCP server (soft-scoped: prefers the active project's copy, else legacy global) */
   updateMcpServer: (slug: string, body: UpdateMcpServerRequest): Promise<McpServerDocument> => {
     return request(`/mcp/servers/${encodeURIComponent(slug)}`, {
       method: "PUT",
       body: JSON.stringify(body),
-    });
+    }, { scoped: true });
   },
 
-  /** Soft-delete an MCP server */
+  /** Soft-delete an MCP server (soft-scoped: prefers the active project's copy, else legacy global) */
   deleteMcpServer: (slug: string): Promise<{ id: string; deleted: boolean }> => {
-    return request(`/mcp/servers/${encodeURIComponent(slug)}`, { method: "DELETE" });
+    return request(`/mcp/servers/${encodeURIComponent(slug)}`, { method: "DELETE" }, { scoped: true });
   },
 
   // ─── Analysis ──────────────────────────────────────────────────────────────
@@ -597,7 +692,7 @@ export const api = {
     if (features && features.length > 0) {
       params.set("features", features.join(","));
     }
-    return request(`/analysis?${params.toString()}`);
+    return request(`/analysis?${params.toString()}`, undefined, { scoped: true });
   },
 
   // ─── MDP ────────────────────────────────────────────────────────────────────
@@ -615,7 +710,7 @@ export const api = {
       params.set("since", since);
     }
     const qs = params.toString();
-    return request(`/criteria/mdp${qs ? `?${qs}` : ""}`);
+    return request(`/criteria/mdp${qs ? `?${qs}` : ""}`, undefined, { scoped: true });
   },
 
   // ─── Reports ──────────────────────────────────────────────────────────────
@@ -657,7 +752,7 @@ export const api = {
     const params = new URLSearchParams();
     if (requestId) params.set("requestId", requestId);
     const qs = params.toString();
-    return request(`/reports${qs ? `?${qs}` : ""}`);
+    return request(`/reports${qs ? `?${qs}` : ""}`, undefined, { scoped: true });
   },
 
   /** Get a single report by ID */
@@ -700,12 +795,12 @@ export const api = {
 
   /** List all report templates */
   listReportTemplates: (): Promise<ReportTemplate[]> => {
-    return request("/report-templates");
+    return request("/report-templates", undefined, { scoped: true });
   },
 
   /** Get a single report template by slug ID */
   getReportTemplate: (id: string): Promise<ReportTemplate> => {
-    return request(`/report-templates/${id}`);
+    return request(`/report-templates/${id}`, undefined, { scoped: true });
   },
 
   /** List models available for report generation */
@@ -727,7 +822,7 @@ export const api = {
     return request("/report-templates", {
       method: "POST",
       body: JSON.stringify(body),
-    });
+    }, { scoped: true });
   },
 
   /** Update an existing report template */
@@ -743,18 +838,23 @@ export const api = {
     return request(`/report-templates/${id}`, {
       method: "PUT",
       body: JSON.stringify(body),
-    });
+    }, { scoped: true });
   },
 
   /** Delete a report template (soft-delete) */
   deleteReportTemplate: (id: string): Promise<void> => {
-    return request(`/report-templates/${id}`, { method: "DELETE" });
+    return request(`/report-templates/${id}`, { method: "DELETE" }, { scoped: true });
   },
 
   // ─── Version ───────────────────────────────────────────────────────────────
 
   /** Get API version information (commit hash and build time) */
-  getVersion: (): Promise<{ commit: string; buildTime: string; environment?: string }> => {
+  getVersion: (): Promise<{
+    commit: string;
+    buildTime: string;
+    environment?: string;
+    strictAgentCapabilities?: boolean;
+  }> => {
     return request("/version");
   },
 
@@ -861,12 +961,12 @@ export const api = {
     if (q) params.set("q", q);
     if (blocked !== undefined) params.set("blocked", String(blocked));
     const qs = params.toString();
-    return request(`/insights${qs ? `?${qs}` : ""}`);
+    return request(`/insights${qs ? `?${qs}` : ""}`, undefined, { scoped: true });
   },
 
   /** Search insights by keyword (fuzzy match) */
   searchInsights: (q: string): Promise<Insight[]> => {
-    return request(`/insights/search?q=${encodeURIComponent(q)}`);
+    return request(`/insights/search?q=${encodeURIComponent(q)}`, undefined, { scoped: true });
   },
 
   /** Get a single insight by ID */
@@ -961,19 +1061,19 @@ export const api = {
 
   /** List all imported skills */
   listSkills: (): Promise<SkillDocument[]> => {
-    return request("/skills");
+    return request("/skills", undefined, { scoped: true });
   },
 
-  /** Get a single skill by slug */
+  /** Get a single skill by slug (soft-scoped: prefers the active project's copy, else legacy global) */
   getSkill: (slug: string): Promise<SkillDocument> => {
-    return request(`/skills/${slug}`);
+    return request(`/skills/${slug}`, undefined, { scoped: true });
   },
 
   /** Search skills in the internal library and the external skills.sh registry */
   searchSkills: (query: string, limit?: number): Promise<SkillSearchResult[]> => {
     const params = new URLSearchParams({ q: query });
     if (limit) params.set("limit", String(limit));
-    return request(`/skills/search?${params}`);
+    return request(`/skills/search?${params}`, undefined, { scoped: true });
   },
 
   /** Search external skills registry only */
@@ -986,7 +1086,7 @@ export const api = {
   /** Discover skills available in a GitHub repo by scanning well-known directories */
   discoverSkills: (source: string): Promise<SkillDiscoveryResult[]> => {
     const params = new URLSearchParams({ source });
-    return request(`/skills/discover?${params}`);
+    return request(`/skills/discover?${params}`, undefined, { scoped: true });
   },
 
   /** Import a skill */
@@ -994,29 +1094,29 @@ export const api = {
     return request("/skills", {
       method: "POST",
       body: JSON.stringify(body),
-    });
+    }, { scoped: true });
   },
 
-  /** Soft-delete a skill */
+  /** Soft-delete a skill (soft-scoped: prefers the active project's copy, else legacy global) */
   deleteSkill: (slug: string): Promise<{ id: string; deleted: boolean }> => {
-    return request(`/skills/${slug}`, { method: "DELETE" });
+    return request(`/skills/${slug}`, { method: "DELETE" }, { scoped: true });
   },
 
-  /** Resolve a skill (create/update revision from GitHub) */
+  /** Resolve a skill (create/update revision from GitHub) — soft-scoped to the active project */
   resolveSkill: (slug: string): Promise<SkillRevisionDocument> => {
-    return request(`/skills/${slug}/resolve`, { method: "POST" });
+    return request(`/skills/${slug}/resolve`, { method: "POST" }, { scoped: true });
   },
 
-  /** List revisions for a skill */
+  /** List revisions for a skill (soft-scoped: prefers the active project's copy, else legacy global) */
   listSkillRevisions: (slug: string): Promise<SkillRevisionDocument[]> => {
-    return request(`/skills/${slug}/revisions`);
+    return request(`/skills/${slug}/revisions`, undefined, { scoped: true });
   },
 
   // ─── Codebases ─────────────────────────────────────────────────────────────
 
   /** List all codebases */
   listCodebases: (): Promise<CodebaseDocument[]> => {
-    return request("/codebases");
+    return request("/codebases", undefined, { scoped: true });
   },
 
   /** Get a single codebase by id */
@@ -1037,7 +1137,7 @@ export const api = {
     return request("/codebases", {
       method: "POST",
       body: JSON.stringify(body),
-    });
+    }, { scoped: true });
   },
 
   /**
@@ -1055,7 +1155,10 @@ export const api = {
     if (meta.description) form.append("description", meta.description);
     if (meta.slug) form.append("slug", meta.slug);
     form.append("archive", file);
-    const res = await apiClient(`${BASE}/codebases`, {
+    // Multipart upload bypasses request(); scope it explicitly like a root create.
+    const projectId = getSelectedProjectId();
+    if (!projectId) throw new ProjectRequiredError();
+    const res = await apiClient(`${BASE}${withProjectId("/codebases", projectId)}`, {
       method: "POST",
       body: form,
     });
@@ -1126,23 +1229,77 @@ export const api = {
     return request(`/codebase-revisions/${id}`);
   },
 
+  // ─── Resources ───────────────────────────────────────────────────────────
+
+  /** List all resources */
+  listResources: (): Promise<ResourceDocument[]> => {
+    return request("/resources", undefined, { scoped: true });
+  },
+
+  /** Get a single resource by id or project-scoped slug */
+  getResource: (idOrSlug: string): Promise<ResourceDocument> => {
+    return request(`/resources/${idOrSlug}`, undefined, { scoped: true });
+  },
+
+  /** Create a resource together with its first immutable revision */
+  createResource: (body: CreateResourceBody): Promise<ResourceDocument & { firstRevision?: ResourceRevisionDocument }> => {
+    return request("/resources", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }, { scoped: true });
+  },
+
+  /** Update a resource's mutable metadata */
+  updateResource: (
+    idOrSlug: string,
+    body: Partial<Pick<ResourceDocument, "name" | "description">>,
+  ): Promise<ResourceDocument> => {
+    return request(`/resources/${idOrSlug}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }, { scoped: true });
+  },
+
+  /** Soft-delete a resource */
+  deleteResource: (idOrSlug: string): Promise<void> => {
+    return request(`/resources/${idOrSlug}`, { method: "DELETE" }, { scoped: true });
+  },
+
+  /** List revisions for a resource */
+  listResourceRevisions: (idOrSlug: string, limit?: number): Promise<ResourceRevisionDocument[]> => {
+    return request(`/resources/${idOrSlug}/revisions${limit ? `?limit=${limit}` : ""}`, undefined, { scoped: true });
+  },
+
+  /** Get a single resource revision by id */
+  getResourceRevision: (id: string): Promise<ResourceRevisionDocument> => {
+    return request(`/resources/revisions/${id}`, undefined, { scoped: true });
+  },
+
+  /** Create a new immutable lifecycle revision */
+  createResourceRevision: (idOrSlug: string, body: CreateResourceRevisionBody): Promise<ResourceRevisionDocument> => {
+    return request(`/resources/${idOrSlug}/revisions`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }, { scoped: true });
+  },
+
   // ─── Extensions ──────────────────────────────────────────────────────────
 
   /** List all imported extensions */
   listExtensions: (): Promise<ExtensionDocument[]> => {
-    return request("/extensions");
+    return request("/extensions", undefined, { scoped: true });
   },
 
-  /** Get a single extension by ID */
+  /** Get a single extension by ID (soft-scoped: prefers the active project's copy, else legacy global) */
   getExtension: (id: string): Promise<ExtensionDocument> => {
-    return request(`/extensions/${id}`);
+    return request(`/extensions/${id}`, undefined, { scoped: true });
   },
 
-  /** Search extensions (internal + VS Code marketplace) */
+  /** Search extensions (internal + VS Code marketplace) — scoped to the active project */
   searchExtensions: (query: string, limit?: number): Promise<ExtensionSearchResult[]> => {
     const params = new URLSearchParams({ q: query });
     if (limit) params.set("limit", String(limit));
-    return request(`/extensions/search?${params}`);
+    return request(`/extensions/search?${params}`, undefined, { scoped: true });
   },
 
   /** Import an extension */
@@ -1150,7 +1307,7 @@ export const api = {
     return request("/extensions", {
       method: "POST",
       body: JSON.stringify(body),
-    });
+    }, { scoped: true });
   },
 
   /** List available versions for an extension from the VS Code marketplace */
@@ -1160,9 +1317,9 @@ export const api = {
     return request(`/extensions/${id}/versions?${params}`);
   },
 
-  /** Soft-delete an extension */
+  /** Soft-delete an extension (soft-scoped: prefers the active project's copy, else legacy global) */
   deleteExtension: (id: string): Promise<{ id: string; deleted: boolean }> => {
-    return request(`/extensions/${id}`, { method: "DELETE" });
+    return request(`/extensions/${id}`, { method: "DELETE" }, { scoped: true });
   },
 
   // ─── Profiles ────────────────────────────────────────────────────────────
@@ -1171,7 +1328,7 @@ export const api = {
   listProfiles: (opts?: { workerType?: string }): Promise<ProfileWithVersion[]> => {
     const params = new URLSearchParams();
     if (opts?.workerType) params.set("workerType", opts.workerType);
-    return request(`/profiles?${params}`);
+    return request(`/profiles?${params}`, undefined, { scoped: true });
   },
 
   /** Get a profile with its latest version */
@@ -1195,24 +1352,28 @@ export const api = {
     description?: string;
     workerType: string;
     model: string;
+    reasoningEffort?: string;
     agentVersion?: string;
     mcpServers?: string[];
     skillRevisions?: string[];
+    resources?: ResourceBindingSpec[];
     extensions?: string[];
   }): Promise<ProfileWithVersion> => {
     return request("/profiles", {
       method: "POST",
       body: JSON.stringify(body),
-    });
+    }, { scoped: true });
   },
 
   /** Create a new version of an existing profile */
   createProfileVersion: (profileId: string, body: {
     workerType: string;
     model: string;
+    reasoningEffort?: string;
     agentVersion?: string;
     mcpServers?: string[];
     skillRevisions?: string[];
+    resources?: ResourceBindingSpec[];
     extensions?: string[];
   }): Promise<ProfileVersionDocument> => {
     return request(`/profiles/${profileId}`, {
@@ -1235,5 +1396,51 @@ export const api = {
   /** Soft-delete a profile */
   deleteProfile: (profileId: string): Promise<void> => {
     return request(`/profiles/${profileId}`, { method: "DELETE" });
+  },
+
+  // ─── Projects ────────────────────────────────────────────────────────────
+  // Projects are the top-level, **unscoped** container. These endpoints never
+  // carry `?projectId=` — the project id lives in the path (or is being
+  // created). Every other scoped family derives its scope from the selected
+  // project (see `request(..., { scoped: true })`).
+
+  /** List all projects (newest first). Pass `includeDeleted` to also return soft-deleted ones. */
+  listProjects: (opts?: { includeDeleted?: boolean }): Promise<Project[]> => {
+    const qs = opts?.includeDeleted ? "?includeDeleted=true" : "";
+    return request(`/projects${qs}`);
+  },
+
+  /** Get a single project by id (404 if missing). */
+  getProject: (id: string): Promise<Project> => {
+    return request(`/projects/${encodeURIComponent(id)}`);
+  },
+
+  /** Create a new project. */
+  createProject: (body: CreateProjectRequest): Promise<Project> => {
+    return request("/projects", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+
+  /** Rename / re-describe a project (projectId is immutable). */
+  updateProject: (id: string, body: UpdateProjectRequest): Promise<Project> => {
+    return request(`/projects/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+  },
+
+  /**
+   * Soft-delete a project. Always succeeds with **204** when the project exists
+   * (even if it still owns scoped data); reversible via {@link restoreProject}.
+   */
+  deleteProject: (id: string): Promise<void> => {
+    return request(`/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
+  },
+
+  /** Restore a soft-deleted project (clears its `deletedAt`). Returns the restored project. */
+  restoreProject: (id: string): Promise<Project> => {
+    return request(`/projects/${encodeURIComponent(id)}/restore`, { method: "POST" });
   },
 };

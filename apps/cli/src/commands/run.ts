@@ -15,9 +15,11 @@ import { colorLevel, dimTimestamp, errorText, successText, label, value, banner,
 import { formatData, isMachineReadable, formatDate } from "../utils/formatters.js";
 import type { OutputFormat, DisplayField } from "../utils/types.js";
 import { runGetAction } from "../run-get-action.js";
-import { normalizeUrl, printFollowUpCommands, withOutputOption, getDefaultApiUrl } from "../utils/shared.js";
+import { normalizeUrl, printFollowUpCommands, withOutputOption, withProjectOption, getDefaultApiUrl } from "../utils/shared.js";
+import { requireProjectId } from "../utils/config.js";
 import { apiFetch, getApiBasePath } from "../utils/api-client.js";
 import { parseGatesOption } from "../utils/gates.js";
+import { buildResourceBindingSpecs, collectRepeatable } from "../utils/resources.js";
 
 /**
  * Resolve a CLI option that may be either a literal string or a `@path`
@@ -29,6 +31,30 @@ function resolveTextOrFile(input: string): string {
     return readFileSync(resolve(input.slice(1)), "utf8");
   }
   return input;
+}
+
+interface ApiErrorBody {
+  error?: unknown;
+  errors?: unknown;
+  conflicts?: unknown;
+}
+
+function formatApiErrorBody(body: ApiErrorBody): string {
+  const lines: string[] = [];
+  if (typeof body.error === "string") {
+    lines.push(body.error);
+  } else if (body.error !== undefined) {
+    lines.push(JSON.stringify(body.error));
+  }
+  if (Array.isArray(body.errors) && body.errors.length > 0) {
+    lines.push("Errors:");
+    lines.push(...body.errors.map((item) => `  - ${String(item)}`));
+  }
+  if (Array.isArray(body.conflicts) && body.conflicts.length > 0) {
+    lines.push("Conflicts:");
+    lines.push(...body.conflicts.map((item) => `  - ${String(item)}`));
+  }
+  return lines.length > 0 ? lines.join("\n") : JSON.stringify(body);
 }
 
 export function registerRunCommands(program: Command): void {
@@ -48,7 +74,7 @@ run
   .option("-p, --persona <path>", "Path to persona YAML file (provides judge personality)")
   .option("-t, --traits <path>", "Path to traits.yaml (default: config/traits.yaml next to persona)")
   .option("-m, --message <message>", "Message/task to process (overrides scenario task)")
-  .option("-w, --worker <worker>", "Worker to use (coder-acp-claude-code, coder-acp-copilot)", "coder-acp-copilot")
+  .option("-w, --worker <worker>", "Registered worker ID (see `scope agent list`)")
   .option("-c, --criteria <criteria...>", "Evaluation criteria (overrides scenario criteria)")
   .option("--max-iterations <number>", "Max judge iterations for multi-turn mode", parseInt)
   .option("--model <model>", "Model to use for the coding agent")
@@ -56,6 +82,8 @@ run
   .option("--mcp-servers <slugs...>", "MCP server slugs to use for this run")
   .option("--skills <slugs...>", "Skill slugs to use for this run (e.g. vercel-labs/agent-skills/my-skill)")
   .option("--codebase <ref>", "Codebase revision id, ref (slug@rN), or slug to use for this run")
+  .option("--resources <specs...>", "Resources to provision for this run (slug, slug@rN, or revision id), in setup order")
+  .option("--resource-param <slug>:<KEY>=<VALUE>", "Resource parameter value (repeatable); matches a --resources entry or profile resource by slug", collectRepeatable, [])
   .option("--extensions <ids...>", "VS Code extension IDs to install for this run (e.g. ms-python.python)")
   .option("--agent-version <version>", "Agent version to target (e.g. copilot-0.0.415); defaults to latest active")
   .option("--profile <id>", "Saved profile to apply (supplies worker, model, extensions, etc.)")
@@ -63,13 +91,17 @@ run
   .option("--profile-variations-file <path>", "Path to JSON file containing profile variation entries")
   .option("--agents-md <text|@file>", "AGENTS.md content delivered to the workspace (prefix with @ to read from a file)")
   .option("--gates <jsonOrFile>", "GateConfig[] JSON or path/@path to a JSON file for gated runs")
-  .option("-u, --url <url>", "API base URL", process.env.SCOPE_API_URL || "http://localhost:3100")
+  .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
+  .option("--project <id>", "Project ID for scoped operations (overrides SCOPE_PROJECT and the saved selection)")
+  .option("--count <number>", "Submit this run N times (1-10). With --profile-variations-file, N runs per profile — repetition is how you separate a real difference between profiles from model variance", (v: string) => Number.parseInt(v, 10))
   .option("--no-stream", "Don't stream logs, just submit")
   .action(async (options, command) => {
-    const { scenario, persona, traits, worker, url, stream, maxIterations, model, reasoningEffort, mcpServers: mcpServerSlugs, skills: skillSlugs, codebase: codebaseRef, extensions: extensionIds, agentVersion, profile, baseProfile, profileVariationsFile, gates: gatesOption, agentsMd: agentsMdInput } = options;
+    const { scenario, persona, traits, worker, url, stream, count, maxIterations, model, reasoningEffort, mcpServers: mcpServerSlugs, skills: skillSlugs, codebase: codebaseRef, resources: resourceSpecs, resourceParam: resourceParamOverrides, extensions: extensionIds, agentVersion, profile, baseProfile, profileVariationsFile, gates: gatesOption, agentsMd: agentsMdInput } = options;
     // `--profile` is the documented flag; `--base-profile` is kept as a hidden
     // back-compat alias. Both resolve to the same request `profileId`.
     const profileId = profile ?? baseProfile;
+    // Fail fast: submitting a run is a root create and requires an explicit project.
+    const projectId = requireProjectId(options.project);
 
     try {
       // Resolve scenario + persona YAML if provided
@@ -105,6 +137,13 @@ run
           criteria: criteria || [],
         },
       };
+      if (count !== undefined) {
+        if (!Number.isInteger(count) || count < 1 || count > 10) {
+          console.error(errorText("Error: --count must be an integer between 1 and 10."));
+          process.exit(1);
+        }
+        body.count = count;
+      }
       if (maxIterations) {
         body.maxIterations = maxIterations;
       }
@@ -125,6 +164,10 @@ run
       }
       if (skillSlugs && skillSlugs.length > 0) {
         body.skills = skillSlugs;
+      }
+      const resources = buildResourceBindingSpecs(resourceSpecs, resourceParamOverrides);
+      if (resources) {
+        body.resources = resources;
       }
       if (codebaseRef) {
         body.codebase = codebaseRef;
@@ -174,23 +217,56 @@ run
       if (isVariationSubmit && command.getOptionValueSource("worker") === "cli") {
         console.warn(label("Warning:"), "--worker is ignored in variation mode; worker is derived per-variation from each profile's workerType.");
       }
-      const submitPath = isVariationSubmit
-        ? `/requests`
-        : `/requests?worker=${worker}`;
+      if (!isVariationSubmit && !profileId && !worker) {
+        console.error(
+          errorText(
+            "Error: --worker is required without --profile. Use `scope agent list` to see currently registered workers.",
+          ),
+        );
+        process.exit(1);
+      }
+      const submitPath =
+        isVariationSubmit || !worker
+          ? `/requests`
+          : `/requests?worker=${encodeURIComponent(worker)}`;
 
       const response = await apiFetch(url, submitPath, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        projectId,
       });
 
       if (!response.ok) {
-        const error = await response.json();
-        console.error(errorText("Error:"), error);
+        const error = (await response.json().catch(() => ({ error: response.statusText }))) as ApiErrorBody;
+        console.error(errorText("Error:"), formatApiErrorBody(error));
         process.exit(1);
       }
 
       const result = await response.json();
+
+      // A variation submit creates one request per profile and returns
+      // { ids, variations, submissionId, ... } with no `id` or `workerType`.
+      // Printing it through the single-request path rendered `undefined` and
+      // then crashed in chalk, so the whole submission looked like it failed
+      // when in fact every request had been created.
+      if (Array.isArray(result.ids) && result.ids.length > 0 && !result.id) {
+        console.log(`${successText('Submitted:')} ${value(String(result.count ?? result.ids.length))} request(s) across ${value(String(result.variationCount ?? result.ids.length))} profile(s)`);
+        if (result.submissionId) console.log(`${label('Submission:')} ${value(result.submissionId)}`);
+        for (const variation of (result.variations ?? [])) {
+          const ids: string[] = variation.ids ?? (variation.id ? [variation.id] : []);
+          const name = variation.label ?? variation.profileName ?? variation.profileId ?? 'variation';
+          console.log(`  ${label(String(name))} ${value(ids.join(', '))}`);
+        }
+        console.log(`${label('Status:')} ${value(result.status)}`);
+        for (const warning of (Array.isArray(result.warnings) ? result.warnings : [])) {
+          console.log(`${errorText('⚠ Warning:')} ${warning}`);
+        }
+        // Streaming follows a single request; a submission has several.
+        printFollowUpCommands(result.ids[0]);
+        return;
+      }
+
       console.log(`${successText('Request submitted:')} ${value(result.id)}`);
       if (result.submissionId) console.log(`${label('Submission:')} ${value(result.submissionId)}`);
       console.log(`${label('Worker:')} ${value(result.workerType)}`);
@@ -410,7 +486,7 @@ run
     });
   });
 
-withOutputOption(
+withProjectOption(withOutputOption(
 run
   .command("list")
   .description("List all requests")
@@ -434,9 +510,10 @@ run
   .option("--sort-by <field>", "Sort field: created, updated, priority, worker, status, id, duration")
   .option("--sort-dir <dir>", "Sort direction: asc or desc")
   .option("--include-deleted", "Include soft-deleted runs")
-)
+))
   .action(async (options) => {
     const format = (options.output || 'table') as OutputFormat;
+    const projectId = requireProjectId(options.project);
     try {
       let path = `/requests`;
       const params = new URLSearchParams();
@@ -502,7 +579,7 @@ run
       const qs = params.toString();
       if (qs) path += `?${qs}`;
 
-      const response = await apiFetch(options.url, path);
+      const response = await apiFetch(options.url, path, { projectId });
 
       if (!response.ok) {
         const error = await response.json();
@@ -715,6 +792,7 @@ run
   .option("-e, --extract", "Extract the archive after downloading")
   .option("-d, --dir <path>", "Extraction directory (implies --extract)")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
+  .option("--project <id>", "Project ID for scoped operations (required with --submission-id)")
   .action(async (options) => {
     const { url } = options;
     const shouldExtract = options.extract || !!options.dir;
@@ -725,7 +803,8 @@ run
 
       if (options.submissionId) {
         console.log(`${label('Fetching runs for submission')} ${value(options.submissionId)}...`);
-        const listResp = await apiFetch(url, `/requests?submissionId=${encodeURIComponent(options.submissionId)}&limit=1000`);
+        const projectId = requireProjectId(options.project);
+        const listResp = await apiFetch(url, `/requests?submissionId=${encodeURIComponent(options.submissionId)}&limit=1000`, { projectId });
         if (!listResp.ok) {
           const error = await listResp.json();
           console.error(errorText("Error fetching runs:"), error);
@@ -812,6 +891,7 @@ run
   .argument("<path>", "Path to .tar.gz archive or extracted directory")
   .option("--dry-run", "Preview what would be uploaded without sending")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
+  .option("--project <id>", "Project ID for scoped operations (overrides SCOPE_PROJECT and the saved selection)")
   .action(async (inputPath: string, options) => {
     const { url, dryRun } = options;
 
@@ -879,6 +959,7 @@ run
       const response = await apiFetch(url, `/runs/upload`, {
         method: "POST",
         body: formData,
+        projectId: requireProjectId(options.project),
       });
 
       // Cleanup temp dir if created
@@ -918,6 +999,7 @@ run
   .argument("<path>", "Path to batch .tar.gz archive")
   .option("--dry-run", "Preview what would be uploaded without sending")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
+  .option("--project <id>", "Project ID for scoped operations (overrides SCOPE_PROJECT and the saved selection)")
   .action(async (inputPath: string, options) => {
     const { url, dryRun } = options;
 
@@ -955,6 +1037,7 @@ run
       const response = await apiFetch(url, `/runs/upload-batch`, {
         method: "POST",
         body: formData,
+        projectId: requireProjectId(options.project),
       });
 
       // 201 = all imported, 207 = partial, 400 = none / bad input

@@ -52,6 +52,7 @@ export const UpdateMcpServerInputSchema = z
 export const McpServerResponseSchema = z
   .object({
     _id: z.string(),
+    slug: z.string(),
     name: z.string(),
     type: McpTransportTypeSchema,
     url: z.string().optional(),
@@ -65,5 +66,6 @@ export const McpServerResponseSchema = z
     createdAt: z.coerce.date(),
     updatedAt: z.coerce.date().optional(),
     deletedAt: z.coerce.date().optional(),
+    projectId: z.string(),
   })
   .openapi("McpServerResponse");

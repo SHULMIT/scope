@@ -12,7 +12,8 @@
     "@agentclientprotocol/sdk": "^0.14.1",
     "coder-acp-copilot": "workspace:*",
     "dotenv": "^16.5.0",
-    "shared": "workspace:*"
+    "shared": "workspace:*",
+    "telemetry": "workspace:*"
   },
   "devDependencies": {
     "tsx": "^4.20.3",

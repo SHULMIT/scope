@@ -43,7 +43,7 @@ describe("task-prompt list", () => {
     try {
       const program = makeProgram();
       await program.parseAsync(
-        ["task-prompt", "list", "--type", "agents.md", "-u", "http://localhost:3100"],
+        ["task-prompt", "list", "--type", "agents.md", "-u", "http://localhost:3100", "--project", "proj-test"],
         { from: "user" },
       );
     } finally {
@@ -51,6 +51,7 @@ describe("task-prompt list", () => {
     }
 
     expect(lastRequest?.url).toContain("type=agents.md");
+    expect(lastRequest?.url).toContain("projectId=proj-test");
   });
 
   it("renders blob-backed prompts without crashing on missing text", async () => {
@@ -65,7 +66,7 @@ describe("task-prompt list", () => {
 
     try {
       const program = makeProgram();
-      await program.parseAsync(["task-prompt", "list", "-u", "http://localhost:3100"], { from: "user" });
+      await program.parseAsync(["task-prompt", "list", "-u", "http://localhost:3100", "--project", "proj-test"], { from: "user" });
     } finally {
       logSpy.mockRestore();
     }
@@ -87,7 +88,7 @@ describe("task-prompt create", () => {
     try {
       const program = makeProgram();
       await program.parseAsync(
-        ["task-prompt", "create", "-t", "# Guidance", "--type", "agents.md", "-u", "http://localhost:3100"],
+        ["task-prompt", "create", "-t", "# Guidance", "--type", "agents.md", "-u", "http://localhost:3100", "--project", "proj-test"],
         { from: "user" },
       );
     } finally {
@@ -95,6 +96,7 @@ describe("task-prompt create", () => {
     }
 
     expect(JSON.parse(lastRequest!.body)).toEqual({ text: "# Guidance", type: "agents.md" });
+    expect(lastRequest!.url).toContain("projectId=proj-test");
   });
 
   it("defaults type to select when not provided", async () => {
@@ -104,7 +106,7 @@ describe("task-prompt create", () => {
     try {
       const program = makeProgram();
       await program.parseAsync(
-        ["task-prompt", "create", "-t", "plain task", "-u", "http://localhost:3100"],
+        ["task-prompt", "create", "-t", "plain task", "-u", "http://localhost:3100", "--project", "proj-test"],
         { from: "user" },
       );
     } finally {
@@ -112,5 +114,6 @@ describe("task-prompt create", () => {
     }
 
     expect(JSON.parse(lastRequest!.body)).toEqual({ text: "plain task", type: "select" });
+    expect(lastRequest!.url).toContain("projectId=proj-test");
   });
 });

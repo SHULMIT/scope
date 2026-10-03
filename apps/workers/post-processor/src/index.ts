@@ -2,6 +2,10 @@
 // Licensed under the MIT License.
 
 import "dotenv/config";
+import { initTelemetry } from "telemetry";
+
+initTelemetry("scope-post-processor");
+
 import { PostProcessor, type PostProcessorConfig } from "./post-processor.js";
 import { AtifHandler } from "./handlers/atif-handler.js";
 

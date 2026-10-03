@@ -64,8 +64,8 @@ export class McpSecretClient {
    * Upsert a secret (create or overwrite by name).
    * Returns metadata only — value is never returned.
    */
-  async storeSecret(mcpId: string, name: string, value: string): Promise<McpSecretListItem> {
-    const url = `${this.tokenManagerUrl}/api/v1/mcp/servers/${encodeURIComponent(mcpId)}/secrets`;
+  async storeSecret(projectId: string, mcpId: string, name: string, value: string): Promise<McpSecretListItem> {
+    const url = `${this.tokenManagerUrl}/api/v1/mcp/servers/${encodeURIComponent(mcpId)}/secrets?projectId=${encodeURIComponent(projectId)}`;
     const res = await this.fetchOrThrow(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -80,10 +80,10 @@ export class McpSecretClient {
   /**
    * Store all secrets from an env map (for stdio servers).
    */
-  async storeEnv(mcpId: string, env: Record<string, string>): Promise<McpSecretListItem[]> {
+  async storeEnv(projectId: string, mcpId: string, env: Record<string, string>): Promise<McpSecretListItem[]> {
     const results: McpSecretListItem[] = [];
     for (const [name, value] of Object.entries(env)) {
-      results.push(await this.storeSecret(mcpId, name, value));
+      results.push(await this.storeSecret(projectId, mcpId, name, value));
     }
     return results;
   }
@@ -91,10 +91,10 @@ export class McpSecretClient {
   /**
    * Store all secrets from a headers array (for sse/http servers).
    */
-  async storeHeaders(mcpId: string, headers: McpServerHeader[]): Promise<McpSecretListItem[]> {
+  async storeHeaders(projectId: string, mcpId: string, headers: McpServerHeader[]): Promise<McpSecretListItem[]> {
     const results: McpSecretListItem[] = [];
     for (const { name, value } of headers) {
-      results.push(await this.storeSecret(mcpId, name, value));
+      results.push(await this.storeSecret(projectId, mcpId, name, value));
     }
     return results;
   }
@@ -102,8 +102,8 @@ export class McpSecretClient {
   /**
    * List secret metadata (names, ids — no values) for an MCP server.
    */
-  async listSecrets(mcpId: string): Promise<McpSecretListItem[]> {
-    const url = `${this.tokenManagerUrl}/api/v1/mcp/servers/${encodeURIComponent(mcpId)}/secrets`;
+  async listSecrets(projectId: string, mcpId: string): Promise<McpSecretListItem[]> {
+    const url = `${this.tokenManagerUrl}/api/v1/mcp/servers/${encodeURIComponent(mcpId)}/secrets?projectId=${encodeURIComponent(projectId)}`;
     const res = await this.fetchOrThrow(url);
     if (!res.ok) {
       throw new Error(`[McpSecretClient] GET ${url} failed: ${res.status} ${res.statusText}`);
@@ -116,8 +116,8 @@ export class McpSecretClient {
    * Returns transport-aware shape: env map for stdio, headers array for sse/http.
    * Internal use only — called by the API before registering with the MCP gateway.
    */
-  async resolveSecrets(mcpId: string): Promise<McpSecretResolved> {
-    const url = `${this.tokenManagerUrl}/api/v1/mcp/servers/${encodeURIComponent(mcpId)}/secrets/resolve`;
+  async resolveSecrets(projectId: string, mcpId: string): Promise<McpSecretResolved> {
+    const url = `${this.tokenManagerUrl}/api/v1/mcp/servers/${encodeURIComponent(mcpId)}/secrets/resolve?projectId=${encodeURIComponent(projectId)}`;
     const res = await this.fetchOrThrow(url);
     if (!res.ok) {
       throw new Error(`[McpSecretClient] GET ${url} failed: ${res.status} ${res.statusText}`);
@@ -128,8 +128,8 @@ export class McpSecretClient {
   /**
    * Delete a single secret by name.
    */
-  async deleteSecret(mcpId: string, name: string): Promise<void> {
-    const url = `${this.tokenManagerUrl}/api/v1/mcp/servers/${encodeURIComponent(mcpId)}/secrets/${encodeURIComponent(name)}`;
+  async deleteSecret(projectId: string, mcpId: string, name: string): Promise<void> {
+    const url = `${this.tokenManagerUrl}/api/v1/mcp/servers/${encodeURIComponent(mcpId)}/secrets/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`;
     const res = await this.fetchOrThrow(url, { method: 'DELETE' });
     if (!res.ok && res.status !== 404) {
       throw new Error(`[McpSecretClient] DELETE ${url} failed: ${res.status} ${res.statusText}`);
@@ -139,8 +139,8 @@ export class McpSecretClient {
   /**
    * Delete all secrets for an MCP server (best-effort, called on server delete).
    */
-  async deleteAllSecrets(mcpId: string): Promise<void> {
-    const items = await this.listSecrets(mcpId).catch(() => [] as McpSecretListItem[]);
-    await Promise.allSettled(items.map((item) => this.deleteSecret(mcpId, item.name)));
+  async deleteAllSecrets(projectId: string, mcpId: string): Promise<void> {
+    const items = await this.listSecrets(projectId, mcpId).catch(() => [] as McpSecretListItem[]);
+    await Promise.allSettled(items.map((item) => this.deleteSecret(projectId, mcpId, item.name)));
   }
 }

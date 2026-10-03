@@ -1,0 +1,214 @@
+---
+title: Submitting requests (REST API)
+description: Submit, monitor, and inspect Scope requests programmatically over HTTP.
+---
+
+The Scope REST API exposes everything the Portal does. Use it to
+automate request submission, integrate Scope into your tools, or
+build custom dashboards.
+
+For interactive use, see [Submitting requests (Portal)](/guides/submitting-requests-portal/).
+
+## Base URL
+
+All endpoints live under `/api/v1` on the Scope host:
+
+```
+https://your-scope.example.com/api/v1
+```
+
+A live OpenAPI / Swagger explorer is available at:
+
+```
+https://your-scope.example.com/api-docs
+```
+
+An auto-generated reference of every endpoint, built from the same
+OpenAPI spec, also lives in this site at
+[REST API reference](/reference/api/).
+
+This page covers the common workflows.
+
+## Access
+
+Use the authentication method configured for your Scope deployment.
+Contact your deployment administrator if you need access details.
+
+See [Access](/getting-started/access/) for details.
+
+## Requests vs runs
+
+You submit a **request**. Scope creates one **run** per execution
+attempt — the first attempt automatically, plus one new run per retry.
+Logs and reports are produced per run.
+
+There is one endpoint group, `/api/v1/requests`, that covers both
+submission and inspection. There's no separate `/runs` resource at the
+API level; run state lives on the request.
+
+## Submit a request
+
+Minimum payload — a task prompt (as text), a list of criteria IDs,
+and an inline runtime configuration:
+
+```http
+POST /api/v1/requests
+Content-Type: application/json
+
+{
+  "scenario": {
+    "task": "Create a Hello World Node.js / Express REST API.",
+    "criteria": ["c-hello-world-express"]
+  },
+  "workerType": "coder-acp-copilot",
+  "model": "gpt-4o"
+}
+```
+
+`scenario.task` is the **prompt text itself** — you don't pass a task
+prompt ID. Scope de-duplicates by text server-side: the first time
+it sees a given task prompt it creates a `TaskPrompt` record; later
+requests with the same text link to the same record. That's how
+prompt features and the **Tasks** page in the Portal work across
+requests.
+
+`scenario.criteria` is a **list of criteria-set IDs** — the criteria
+themselves live in `/api/v1/criteria`. See
+[Defining evaluation criteria](/guides/defining-criteria/).
+
+Or submit using a saved profile (recommended for reproducibility):
+
+```http
+POST /api/v1/requests
+Content-Type: application/json
+
+{
+  "scenario": {
+    "task": "Create a Hello World Node.js / Express REST API.",
+    "criteria": ["c-hello-world-express"]
+  },
+  "profileId": "p-550e8400-e29b-41d4-a716-446655440001"
+}
+```
+
+When you reference a profile by ID, Scope resolves it to the
+profile's *latest version* and stamps both `profileId` and
+`profileVersionId` on the request. To pin a specific version, pass
+`profileVersionId` directly.
+
+The response includes the new request's ID and initial state:
+
+```json
+{
+  "id": "req-018c7d2a-7e92-7b1a-9c3a-4f4f5d6e7e8a",
+  "submissionId": "sub-018c7d2a-…",
+  "status": "pending",
+  "mode": "multi-turn"
+}
+```
+
+## Stream logs
+
+Logs from the current run stream over Server-Sent Events:
+
+```http
+GET /api/v1/requests/{requestId}/logs
+```
+
+The response is `text/event-stream`. Pass `?fromStart=true` to replay
+historical logs from blob storage. Consume it with any SSE-capable
+client.
+
+## Fetch request state
+
+```http
+GET /api/v1/requests/{requestId}
+```
+
+Returns the request document, including `status`, the resolved
+configuration, and the current `run` (with `attemptNumber`, `status`,
+`outcome`, `turns`, …).
+
+```http
+GET /api/v1/requests
+```
+
+Lists requests. Supports query parameters for filtering, search, and
+pagination (see Swagger for the full set).
+
+## Retry
+
+To create another run on the same request:
+
+```http
+POST /api/v1/requests/bulk-resubmit
+```
+
+This endpoint takes a list of request IDs and reuses each request's
+configuration to create a new run.
+
+## Reports
+
+Reports are created on demand:
+
+```http
+POST /api/v1/reports
+Content-Type: application/json
+
+{ "requestId": "req-018c7d2a-…" }
+```
+
+The response includes the new report's ID and `status: "pending"`.
+Fetch it later with `GET /api/v1/reports/{id}`.
+
+## Manage task prompts, criteria, profiles, prompt features
+
+Each of these has its own CRUD endpoint group under `/api/v1/`:
+
+- `/api/v1/task-prompts` — see [Managing task prompts](/guides/managing-task-prompts/).
+- `/api/v1/criteria` — see [Defining evaluation criteria](/guides/defining-criteria/).
+- `/api/v1/profiles` — see [Defining profiles](/guides/defining-profiles/).
+- `/api/v1/prompt-features` — see [Working with prompt features](/guides/prompt-features/).
+
+A consolidated reference is at [REST API](/reference/rest-api/).
+
+## Errors
+
+Errors follow a consistent shape:
+
+```json
+{
+  "error": {
+    "code": "INVALID_REQUEST",
+    "message": "Worker type 'coder-acp-copilot' does not support VS Code extensions"
+  }
+}
+```
+
+HTTP status codes follow standard conventions: `400` for malformed
+input, `404` for missing resources, `409` for conflicts, `503` when a
+downstream service (e.g. an LLM provider) is unavailable.
+
+## Idempotency
+
+Request submission is **not** idempotent — every `POST /api/v1/requests`
+creates a new request, even if you send the same payload twice. Build
+idempotency on top by caching the returned `id` if you need it.
+
+## Tips
+
+- **Pin everything for production**: pass `profileVersionId` (not
+  `profileId`) so a later edit to the profile doesn't change what your
+  pipeline runs.
+- **Poll sparingly**: prefer the SSE log stream to status polling.
+- **Use the reference**: the [REST API reference](/reference/api/)
+  is the source of truth for exact request and response shapes. Your
+  deployment may also provide Swagger UI at `/api-docs`.
+
+## Next steps
+
+- Reference page: [REST API](/reference/rest-api/).
+- Define a [profile](/guides/defining-profiles/) to use in your
+  programmatic submissions.
+- Or use the [CLI](/guides/submitting-requests-cli/) for an
+  interactive terminal workflow with log streaming.

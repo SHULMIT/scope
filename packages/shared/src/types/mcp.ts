@@ -17,7 +17,9 @@ export interface McpServerHeader {
 
 /** MCP server document stored in MongoDB */
 export interface McpServerDocument {
-  _id: string;                    // Slug identifier (e.g. "my-search-server")
+  _id: string;                    // Opaque UUID (internal). Legacy rows (pre-migration 027) key _id to the slug.
+  slug: string;                   // Human reference key (^[a-z0-9]([a-z0-9-]*[a-z0-9])?$); unique per project
+  projectId: string;              // FK → ProjectDocument._id (immutable scope)
   name: string;                   // Human-readable display name
   type: McpTransportType;         // Transport type
   url?: string;                   // Server URL (required for sse/http)
@@ -36,7 +38,8 @@ export interface McpServerDocument {
 /** MCP server secret document stored in Token Manager MongoDB (values live in Key Vault only) */
 export interface McpSecretDocument {
   _id: string;        // MongoDB ObjectId as hex string
-  mcpId: string;      // McpServerDocument._id slug (e.g. "azure")
+  projectId: string;  // FK → ProjectDocument._id (immutable scope; secrets isolate per project)
+  mcpId: string;      // McpServerDocument.slug (e.g. "azure")
   name: string;       // Secret name (e.g. "AZURE_CLIENT_SECRET" or "Authorization")
   createdAt: Date;
   updatedAt: Date;
@@ -45,7 +48,7 @@ export interface McpSecretDocument {
 /** Resolved MCP server configuration passed to workers at runtime */
 export interface McpServerConfig {
   type: McpTransportType;
-  slug: string;                   // Gateway-safe identifier (^[a-zA-Z0-9_-]+$), maps from McpServerDocument._id; used for secret resolution
+  slug: string;                   // Gateway-safe identifier (^[a-zA-Z0-9_-]+$), maps from McpServerDocument.slug; used for secret resolution
   name: string;                   // Human-readable display name
   url?: string;                   // required for sse/http
   command?: string;               // required for stdio

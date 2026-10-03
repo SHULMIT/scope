@@ -7,7 +7,8 @@ import { configureHelp } from "../utils/helpFormatter.js";
 import { banner, colorLevel, dimTimestamp, errorText, successText, label, value, warnBanner } from "../utils/style.js";
 import { formatData, isMachineReadable } from "../utils/formatters.js";
 import type { OutputFormat, DisplayField } from "../utils/types.js";
-import { normalizeUrl, withOutputOption, getCliName, getDefaultApiUrl } from "../utils/shared.js";
+import { normalizeUrl, withOutputOption, withProjectOption, getCliName, getDefaultApiUrl } from "../utils/shared.js";
+import { requireProjectId } from "../utils/config.js";
 import { apiFetch, getApiBasePath } from "../utils/api-client.js";
 
 export function registerReportCommands(program: Command): void {
@@ -177,20 +178,21 @@ report
     }
   });
 
-withOutputOption(
+withProjectOption(withOutputOption(
 report
   .command("list")
   .description("List all reports (optionally filter by run)")
   .option("-r, --run <requestId>", "Filter by run ID")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
-)
+))
   .action(async (options) => {
     const format = (options.output || 'table') as OutputFormat;
+    const projectId = requireProjectId(options.project);
     try {
       const params = new URLSearchParams();
       if (options.run) params.set("requestId", options.run);
       const qs = params.toString();
-      const response = await apiFetch(options.url, `/reports${qs ? `?${qs}` : ""}`);
+      const response = await apiFetch(options.url, `/reports${qs ? `?${qs}` : ""}`, { projectId });
 
       if (!response.ok) {
         const error = await response.json();

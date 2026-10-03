@@ -2,6 +2,10 @@
 // Licensed under the MIT License.
 
 import "dotenv/config";
+import { initTelemetry } from "telemetry";
+
+initTelemetry("scope-report-generator");
+
 import { ReportQueueProcessor, ReportQueueProcessorConfig } from "./report-queue-processor.js";
 
 const config: ReportQueueProcessorConfig = {

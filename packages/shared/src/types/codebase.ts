@@ -20,6 +20,7 @@ export type CodebaseSourceType = "git" | "archive";
  */
 export interface CodebaseDocument {
   _id: string;                    // Fresh UUID
+  projectId: string;              // FK → ProjectDocument._id (immutable scope)
   slug: string;                   // Unique, URL-safe identifier (derived from name)
   name: string;                   // Human-readable display name
   description?: string;
@@ -54,6 +55,7 @@ export interface CodebaseDocument {
 export interface CodebaseRevisionDocument {
   _id: string;                    // Fresh UUID (one per revision)
   codebaseId: string;             // FK → CodebaseDocument._id
+  projectId: string;              // FK → ProjectDocument._id (denormalized from codebase)
   slug: string;                   // Denormalized parent slug (for ref building/lookup)
   revisionNumber: number;         // Sequential per codebase (1,2,3…)
   ref: string;                    // Canonical display ref: "{slug}@r{revisionNumber}"

@@ -1,0 +1,14 @@
+{{#each licenses}}
+The following Rust crate(s) are redistributed in this product under the {{{name}}} ({{id}}):
+
+{{#each used_by}}
+ - {{crate.name}} {{crate.version}}
+{{/each}}
+
+Full text of the {{{name}}} ({{id}}) as shipped by the crate(s) listed above:
+
+{{{text}}}
+
+-------------------------------------------------------------------------------
+
+{{/each}}

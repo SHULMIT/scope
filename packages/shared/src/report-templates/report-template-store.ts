@@ -29,6 +29,7 @@ export class ReportTemplateStore {
 
   /** Create a new report template. Validates uniqueness and required fields. */
   async create(input: {
+    projectId: string;
     id: string;
     name: string;
     description?: string;
@@ -36,7 +37,7 @@ export class ReportTemplateStore {
     systemPrompt?: { mode: 'append' | 'override'; content: string };
     trigger?: ReportTemplateDocument['trigger'];
   }): Promise<ReportTemplateDocument> {
-    const { id, name, userPrompt, description, systemPrompt, trigger } = input;
+    const { projectId, id, name, userPrompt, description, systemPrompt, trigger } = input;
 
     // Validate ID format
     if (!/^[a-z][a-z0-9_-]*$/.test(id)) {
@@ -61,6 +62,7 @@ export class ReportTemplateStore {
 
     const doc: ReportTemplateDocument = {
       _id: crypto.randomUUID(),
+      projectId,
       id,
       name: name.trim(),
       ...(description ? { description: description.trim() } : {}),

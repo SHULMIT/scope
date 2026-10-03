@@ -3,12 +3,15 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SkillRevisionStore } from './skill-revision-store.js';
-import { computeSkillRevisionId } from './skill-revision-id.js';
 import type { SkillRevisionDocument } from '../types/skill.js';
+
+/** Project scope used across these unit tests. */
+const PID = 'proj-test';
 
 /** Build a full SkillRevisionDocument with required defaults */
 function makeRevDoc(overrides: Partial<SkillRevisionDocument> & Pick<SkillRevisionDocument, '_id' | 'ref' | 'source' | 'skillName' | 'commitHash' | 'name' | 'content'>): SkillRevisionDocument {
   return {
+    projectId: PID,
     skillPath: `skills/${overrides.skillName}`,
     commitTimestamp: new Date(),
     description: 'test description',
@@ -24,6 +27,13 @@ function makeMockCollection() {
   const store = new Map<string, SkillRevisionDocument>();
   const toArrayResult: SkillRevisionDocument[] = [];
 
+  const matches = (doc: SkillRevisionDocument, filter: any): boolean => {
+    if (filter._id !== undefined && doc._id !== filter._id) return false;
+    if (filter.projectId !== undefined && doc.projectId !== filter.projectId) return false;
+    if (filter.ref !== undefined && doc.ref !== filter.ref) return false;
+    return true;
+  };
+
   const mockChain = {
     sort: vi.fn().mockReturnThis(),
     limit: vi.fn().mockReturnThis(),
@@ -32,7 +42,9 @@ function makeMockCollection() {
 
   return {
     findOne: vi.fn().mockImplementation(async (filter: any) => {
-      if (filter._id) return store.get(filter._id) ?? null;
+      for (const doc of store.values()) {
+        if (matches(doc, filter)) return doc;
+      }
       return null;
     }),
     find: vi.fn().mockReturnValue(mockChain),
@@ -40,6 +52,7 @@ function makeMockCollection() {
       store.set(doc._id, doc);
       return { insertedId: doc._id };
     }),
+    deleteMany: vi.fn().mockImplementation(async () => ({ deletedCount: 0 })),
     _store: store,
     _chain: mockChain,
     _toArrayResult: toArrayResult,
@@ -78,11 +91,10 @@ describe('SkillRevisionStore', () => {
   });
 
   describe('getByRef', () => {
-    it('computes ID from ref and looks up', async () => {
+    it('looks up by project + ref', async () => {
       const ref = 'owner/repo/skill@abc123';
-      const id = computeSkillRevisionId(ref);
       const doc = makeRevDoc({
-        _id: id,
+        _id: 'uuid-1',
         ref,
         source: 'owner/repo',
         skillName: 'skill',
@@ -90,14 +102,31 @@ describe('SkillRevisionStore', () => {
         name: 'Test',
         content: '# content',
       });
-      mockCol._store.set(id, doc);
-      const result = await revStore.getByRef(ref);
+      mockCol._store.set('uuid-1', doc);
+      const result = await revStore.getByRef(PID, ref);
       expect(result).toEqual(doc);
+    });
+
+    it('does not find another project\'s ref', async () => {
+      const ref = 'owner/repo/skill@abc123';
+      mockCol._store.set('uuid-1', makeRevDoc({
+        _id: 'uuid-1',
+        projectId: 'project-a',
+        ref,
+        source: 'owner/repo',
+        skillName: 'skill',
+        commitHash: 'abc123',
+        name: 'Test',
+        content: '# content',
+      }));
+      const result = await revStore.getByRef('project-b', ref);
+      expect(result).toBeNull();
     });
   });
 
   describe('findOrCreate', () => {
     const inputDoc = {
+      projectId: PID,
       ref: 'owner/repo/skill@abc123',
       source: 'owner/repo',
       skillName: 'skill',
@@ -111,60 +140,74 @@ describe('SkillRevisionStore', () => {
       resolvedAt: new Date(),
     };
 
-    it('creates a new document when it does not exist', async () => {
+    it('creates a new document with a fresh UUID when it does not exist', async () => {
       const result = await revStore.findOrCreate(inputDoc);
-      const expectedId = computeSkillRevisionId(inputDoc.ref);
-      expect(result._id).toBe(expectedId);
+      expect(result._id).toBeTruthy();
+      expect(result.ref).toBe(inputDoc.ref);
+      expect(result.projectId).toBe(PID);
       expect(result.name).toBe('Test Skill');
       expect(result.content).toBe('# content');
       expect(mockCol.insertOne).toHaveBeenCalledOnce();
     });
 
     it('returns existing document without inserting', async () => {
-      const id = computeSkillRevisionId(inputDoc.ref);
-      const existing = makeRevDoc({ ...inputDoc, _id: id });
-      mockCol._store.set(id, existing);
+      const existing = makeRevDoc({ ...inputDoc, _id: 'uuid-existing' });
+      mockCol._store.set('uuid-existing', existing);
 
       const result = await revStore.findOrCreate(inputDoc);
       expect(result).toEqual(existing);
       expect(mockCol.insertOne).not.toHaveBeenCalled();
     });
 
-    it('is idempotent — same ref returns same ID', async () => {
+    it('is idempotent within a project — same ref returns same doc', async () => {
       const r1 = await revStore.findOrCreate(inputDoc);
-      // Simulate that the doc is now in the store (insertOne populated it)
       const r2 = await revStore.findOrCreate(inputDoc);
       expect(r1._id).toBe(r2._id);
+      expect(mockCol.insertOne).toHaveBeenCalledOnce();
+    });
+
+    it('creates distinct per-project copies for the same ref', async () => {
+      const a = await revStore.findOrCreate({ ...inputDoc, projectId: 'project-a' });
+      const b = await revStore.findOrCreate({ ...inputDoc, projectId: 'project-b' });
+      expect(a.ref).toBe(b.ref);
+      expect(a._id).not.toBe(b._id);
+      expect(mockCol.insertOne).toHaveBeenCalledTimes(2);
     });
   });
 
   describe('listBySkill', () => {
-    it('calls find with source and skillName', async () => {
-      await revStore.listBySkill('owner/repo', 'my-skill');
-      expect(mockCol.find).toHaveBeenCalledWith({ source: 'owner/repo', skillName: 'my-skill' });
+    it('calls find with project, source and skillName', async () => {
+      await revStore.listBySkill(PID, 'owner/repo', 'my-skill');
+      expect(mockCol.find).toHaveBeenCalledWith({ projectId: PID, source: 'owner/repo', skillName: 'my-skill' });
       expect(mockCol._chain.sort).toHaveBeenCalledWith({ resolvedAt: -1 });
       expect(mockCol._chain.limit).toHaveBeenCalledWith(20);
     });
 
     it('respects custom limit', async () => {
-      await revStore.listBySkill('a', 'b', { limit: 5 });
+      await revStore.listBySkill(PID, 'a', 'b', { limit: 5 });
       expect(mockCol._chain.limit).toHaveBeenCalledWith(5);
     });
   });
 
   describe('getByRefs', () => {
     it('returns empty array for empty refs', async () => {
-      const result = await revStore.getByRefs([]);
+      const result = await revStore.getByRefs(PID, []);
       expect(result).toEqual([]);
       expect(mockCol.find).not.toHaveBeenCalled();
     });
 
-    it('queries by computed IDs', async () => {
+    it('queries by project + refs', async () => {
       const refs = ['owner/repo/s1@abc', 'owner/repo/s2@def'];
-      const ids = refs.map(computeSkillRevisionId);
 
-      await revStore.getByRefs(refs);
-      expect(mockCol.find).toHaveBeenCalledWith({ _id: { $in: ids } });
+      await revStore.getByRefs(PID, refs);
+      expect(mockCol.find).toHaveBeenCalledWith({ projectId: PID, ref: { $in: refs } });
+    });
+  });
+
+  describe('deleteBySkill', () => {
+    it('deletes by project, source and skillName', async () => {
+      await revStore.deleteBySkill(PID, 'owner/repo', 'my-skill');
+      expect(mockCol.deleteMany).toHaveBeenCalledWith({ projectId: PID, source: 'owner/repo', skillName: 'my-skill' });
     });
   });
 });

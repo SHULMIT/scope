@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
 import {
   CreateExtensionInputSchema,
   ExtensionClient,
@@ -13,6 +14,7 @@ import {
 import type { ExtensionSearchResult } from "shared";
 import { apiRoute } from "../openapi/api-route.js";
 import type { ExtensionDocument, RouteContext } from "../route-context.js";
+import { ProjectIdQuerySchema, getQueryProjectId } from "../utils/project-scope.js";
 
 export function registerExtensionsRoutes(ctx: RouteContext): void {
 
@@ -20,19 +22,66 @@ export function registerExtensionsRoutes(ctx: RouteContext): void {
 // Extensions API (VS Code Extensions)
 // =====================================================================
 
+/** Public identifier for an extension = its human slug (falls back to legacy _id-as-slug rows). */
+const extensionSlug = (e: ExtensionDocument): string => e.slug ?? e._id;
+
+/**
+ * Map a stored extension doc to the API response shape.
+ *
+ * After migration 026, `_id` is an internal random UUID and the human slug lives
+ * in `slug`. The API contract speaks only in slugs, so we mask `_id` back to the
+ * slug on the way out and never leak the internal UUID (`id` and `slug` both = the
+ * human slug too). Legacy rows (pre-026) still have `_id === slug`, so masking is a
+ * no-op for them. Mirrors `versionResponse` in profiles.ts / `toMcpResponse`.
+ */
+const toExtensionResponse = (e: ExtensionDocument): ExtensionDocument & { id: string } => ({
+  ...e,
+  _id: extensionSlug(e),
+  slug: extensionSlug(e),
+  id: extensionSlug(e),
+});
+
+/**
+ * Resolve an extension by its human slug (`{publisher}.{name}`), **always scoped
+ * to a project**.
+ *
+ * New rows key `_id` to a random UUID and carry the slug in `slug`; legacy rows
+ * (pre-migration 026) still have `_id === slug`. The lookup is confined to
+ * `projectId` (slugs may repeat across projects), trying the `slug` field first
+ * then the legacy `_id` for un-backfilled rows. There is **no global slug-only
+ * fallback**: a project-scoped entity is never resolved by slug alone.
+ */
+const findExtensionBySlug = async (
+  slug: string,
+  projectId: string,
+): Promise<ExtensionDocument | null> => {
+  const bySlug = await ctx.extensionCollection.findOne({
+    projectId,
+    slug,
+    deletedAt: { $exists: false },
+  });
+  if (bySlug) return bySlug as ExtensionDocument;
+  return (await ctx.extensionCollection.findOne({
+    projectId,
+    _id: slug,
+    deletedAt: { $exists: false },
+  })) as ExtensionDocument | null;
+};
+
 // GET /api/v1/extensions — list all extensions
 apiRoute(ctx.app, ctx.registry, {
   method: "get",
   path: "/api/v1/extensions",
   tags: ["Extensions"],
   summary: "List all extensions",
+  query: ProjectIdQuerySchema,
   response: z.array(ExtensionResponseSchema),
-  handler: async (_req, res) => {
+  handler: async (req, res) => {
     const extensions = await ctx.extensionCollection
-      .find({ deletedAt: { $exists: false } })
+      .find({ projectId: getQueryProjectId(req), deletedAt: { $exists: false } })
       .toArray();
-    extensions.sort((a, b) => a._id.localeCompare(b._id));
-    res.json(extensions.map((e) => ({ ...e, id: e._id })));
+    extensions.sort((a, b) => extensionSlug(a as ExtensionDocument).localeCompare(extensionSlug(b as ExtensionDocument)));
+    res.json(extensions.map((e) => toExtensionResponse(e as ExtensionDocument)));
   },
 });
 
@@ -43,7 +92,7 @@ apiRoute(ctx.app, ctx.registry, {
   path: "/api/v1/extensions/search",
   tags: ["Extensions"],
   summary: "Search extensions (internal + marketplace)",
-  query: z.object({ q: z.string(), limit: z.string().optional() }),
+  query: z.object({ q: z.string(), limit: z.string().optional() }).merge(ProjectIdQuerySchema),
   response: z.array(ExtensionSearchResultSchema),
   errorResponses: {
     400: { description: "Missing query parameter" },
@@ -51,6 +100,7 @@ apiRoute(ctx.app, ctx.registry, {
   handler: async (req, res, next) => {
     try {
       const { q, limit: limitStr } = req.query;
+      const projectId = getQueryProjectId(req);
 
       if (!q || typeof q !== "string" || !q.trim()) {
         res.status(400).json({ error: "Query parameter 'q' is required" });
@@ -60,12 +110,14 @@ apiRoute(ctx.app, ctx.registry, {
       const limit = Math.min(Math.max(parseInt(limitStr as string, 10) || 10, 1), 50);
       const query = q.trim();
 
-      // Search internal DB (case-insensitive regex)
+      // Search internal DB (case-insensitive regex), scoped to the project
       const regex = { $regex: query, $options: "i" };
       const internalExtensions = await ctx.extensionCollection
         .find({
           deletedAt: { $exists: false },
+          projectId,
           $or: [
+            { slug: regex },
             { _id: regex },
             { name: regex },
             { publisher: regex },
@@ -76,14 +128,14 @@ apiRoute(ctx.app, ctx.registry, {
         .toArray();
 
       const internalResults: ExtensionSearchResult[] = internalExtensions.map((e) => ({
-        id: e._id,
+        id: extensionSlug(e as ExtensionDocument),
         name: e.name,
         publisher: e.publisher,
         description: e.description,
         internal: true,
       }));
 
-      const internalIds = new Set(internalExtensions.map((e) => e._id));
+      const internalIds = new Set(internalExtensions.map((e) => extensionSlug(e as ExtensionDocument)));
 
       // Search VS Code marketplace
       let externalResults: ExtensionSearchResult[] = [];
@@ -110,17 +162,15 @@ apiRoute(ctx.app, ctx.registry, {
   tags: ["Extensions"],
   summary: "Get extension by ID",
   params: z.object({ id: z.string() }),
+  query: ProjectIdQuerySchema,
   response: ExtensionResponseSchema,
   handler: async (req, res) => {
-    const extension = await ctx.extensionCollection.findOne({
-      _id: req.params.id,
-      deletedAt: { $exists: false },
-    });
+    const extension = await findExtensionBySlug(req.params.id, getQueryProjectId(req));
     if (!extension) {
       res.status(404).json({ error: "Extension not found" });
       return;
     }
-    res.json({ ...extension, id: extension._id });
+    res.json(toExtensionResponse(extension));
   },
 });
 
@@ -130,18 +180,25 @@ apiRoute(ctx.app, ctx.registry, {
   path: "/api/v1/extensions",
   tags: ["Extensions"],
   summary: "Create or import an extension",
+  query: ProjectIdQuerySchema,
   body: CreateExtensionInputSchema,
   response: ExtensionResponseSchema,
   handler: async (req, res) => {
-    const { _id, publisher, name, description, origin } = req.body;
+    const projectId = getQueryProjectId(req);
+    const { _id: slug, publisher, name, description, origin } = req.body;
     const now = new Date();
-    const existing = await ctx.extensionCollection.findOne({ _id });
+    // Same-project lookup by slug (new rows) or legacy _id-as-slug rows.
+    const existing = await ctx.extensionCollection.findOne({
+      projectId,
+      $or: [{ slug }, { _id: slug }],
+    });
 
     if (existing) {
       await ctx.extensionCollection.updateOne(
-        { _id },
+        { _id: existing._id },
         {
           $set: {
+            slug,
             publisher,
             name,
             ...(description !== undefined ? { description } : {}),
@@ -151,11 +208,13 @@ apiRoute(ctx.app, ctx.registry, {
           $unset: { deletedAt: "" },
         },
       );
-      const updated = await ctx.extensionCollection.findOne({ _id });
-      res.json({ ...updated, id: updated!._id });
+      const updated = await ctx.extensionCollection.findOne({ _id: existing._id });
+      res.json(toExtensionResponse(updated as ExtensionDocument));
     } else {
       const extensionDoc: ExtensionDocument = {
-        _id,
+        _id: randomUUID(),
+        slug,
+        projectId,
         publisher,
         name,
         ...(description ? { description } : {}),
@@ -163,7 +222,7 @@ apiRoute(ctx.app, ctx.registry, {
         createdAt: now,
       };
       await ctx.extensionCollection.insertOne(extensionDoc);
-      res.status(201).json({ ...extensionDoc, id: extensionDoc._id });
+      res.status(201).json(toExtensionResponse(extensionDoc));
     }
   },
 });
@@ -175,16 +234,13 @@ apiRoute(ctx.app, ctx.registry, {
   tags: ["Extensions"],
   summary: "Update extension",
   params: z.object({ id: z.string() }),
+  query: ProjectIdQuerySchema,
   body: UpdateExtensionInputSchema,
   response: ExtensionResponseSchema,
   handler: async (req, res) => {
-    const { id } = req.params;
     const { name, description } = req.body;
 
-    const existing = await ctx.extensionCollection.findOne({
-      _id: id,
-      deletedAt: { $exists: false },
-    });
+    const existing = await findExtensionBySlug(req.params.id, getQueryProjectId(req));
     if (!existing) {
       res.status(404).json({ error: "Extension not found" });
       return;
@@ -194,9 +250,9 @@ apiRoute(ctx.app, ctx.registry, {
     if (name !== undefined) updateFields.name = name;
     if (description !== undefined) updateFields.description = description;
 
-    await ctx.extensionCollection.updateOne({ _id: id }, { $set: updateFields });
-    const updated = await ctx.extensionCollection.findOne({ _id: id });
-    res.json({ ...updated, id: updated!._id });
+    await ctx.extensionCollection.updateOne({ _id: existing._id }, { $set: updateFields });
+    const updated = await ctx.extensionCollection.findOne({ _id: existing._id });
+    res.json(toExtensionResponse(updated as ExtensionDocument));
   },
 });
 
@@ -207,22 +263,18 @@ apiRoute(ctx.app, ctx.registry, {
   tags: ["Extensions"],
   summary: "Delete extension",
   params: z.object({ id: z.string() }),
+  query: ProjectIdQuerySchema,
   response: z.object({ message: z.string() }),
   successStatus: 204,
   handler: async (req, res) => {
-    const { id } = req.params;
-
-    const existing = await ctx.extensionCollection.findOne({
-      _id: id,
-      deletedAt: { $exists: false },
-    });
+    const existing = await findExtensionBySlug(req.params.id, getQueryProjectId(req));
     if (!existing) {
       res.status(404).json({ error: "Extension not found" });
       return;
     }
 
     await ctx.extensionCollection.updateOne(
-      { _id: id },
+      { _id: existing._id },
       { $set: { deletedAt: new Date(), updatedAt: new Date() } },
     );
 

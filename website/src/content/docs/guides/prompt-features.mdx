@@ -1,0 +1,126 @@
+---
+title: Working with prompt features
+description: Auto-detect characteristics of your task prompts and slice your benchmark data by them.
+---
+
+A **prompt feature** is a boolean characteristic detected on a task
+prompt — for example `asks_for_api`, `asks_for_testing`, or
+`asks_for_docker`. Features let you slice and group runs across
+heterogeneous tasks: *"how does profile X do on prompts that ask for
+testing?"*
+
+Features are managed in a shared **catalog**. Each feature has an ID,
+a description, and a detection prompt the LLM uses to decide whether
+the feature applies to a given task prompt.
+
+## Extracting features from a task prompt
+
+Feature extraction is **on-demand**, not automatic on run submission.
+Trigger it from the Portal or the API.
+
+### Portal
+
+Open a task prompt's detail page and click **Extract features**. The
+page shows which catalog features were detected, plus any new
+features the LLM **suggests adding** based on the prompt.
+
+### REST API
+
+```http
+POST /api/v1/task-prompts/{id}/extract-features
+```
+
+Add `?force=true` to bypass the cache and re-run extraction. The
+response returns the list of detected features, the extraction
+timestamp, and any suggested new features.
+
+Extraction is cached: re-extracting the same task prompt returns the
+cached result unless you pass `force=true`.
+
+## Browsing the feature catalog
+
+The Portal's **Prompt features** page lists every defined feature,
+its ID, and its detection prompt. Use it to:
+
+- See what the LLM is looking for under each label.
+- Search and filter features by ID or text.
+- Open a feature's detail page to read its full detection prompt.
+
+## Manually overriding a detection
+
+Sometimes the LLM gets it wrong, or you want to mark a feature as
+applying for reasons the prompt doesn't make obvious.
+
+### Portal
+
+On the task prompt detail page, toggle the feature's **Detected**
+switch. The change is recorded as a manual evaluation and persists
+across re-extractions.
+
+### REST API
+
+```http
+PATCH /api/v1/task-prompts/{id}/features/{featureId}
+Content-Type: application/json
+
+{ "detected": true }
+```
+
+## Adding a new feature
+
+You can add features yourself when an existing one doesn't capture
+what you want.
+
+### AI-assisted creation (recommended)
+
+In the Portal, the **Create feature** wizard accepts a plain-English
+description of the behavior you want to detect ("does the prompt
+ask for a database?") and uses an LLM to:
+
+- Suggest a `snake_case` ID.
+- Draft a detection prompt.
+- Optionally suggest parent/child relationships with existing
+  features.
+
+You can edit any of the generated fields before saving.
+
+The same is exposed via the API:
+
+```http
+POST /api/v1/prompt-features/generate-prompt
+Content-Type: application/json
+
+{ "behavior": "Asks the agent to write a Dockerfile or container setup" }
+```
+
+### From a suggestion
+
+When you extract features on a task prompt, the response (and the
+Portal page) often shows **suggested features** the LLM thinks would
+be useful additions to the catalog. Click **Promote** in the Portal,
+or take the suggestion through the wizard, to add it.
+
+## Tips
+
+- **Use features to find patterns.** They're most useful when you
+  filter or group runs by them in dashboards — not when read one at a
+  time.
+- **Promote only stable features.** Each catalog feature is a
+  commitment to keep its detection prompt healthy. Don't promote
+  every suggestion.
+- **Edit detection prompts when results drift.** If a feature is
+  consistently misfiring, edit its detection prompt — that's the
+  knob.
+
+## Limitations
+
+- Feature extraction and generation use an LLM and can return **503**
+  when the model service is unavailable or rate-limited. Retry, or
+  re-trigger extraction from the Portal.
+- Detection is probabilistic. For high-stakes filtering, spot-check a
+  sample and use manual overrides where needed.
+
+## See also
+
+- [Prompt feature schema reference](/reference/prompt-feature-schema/)
+- [Managing task prompts](/guides/managing-task-prompts/)

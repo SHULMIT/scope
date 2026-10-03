@@ -1,0 +1,137 @@
+---
+title: Managing task prompts
+description: How Scope catalogs and re-uses task prompts.
+---
+
+A **task prompt** is the text instructions sent to the agent. In MS
+Scope, every distinct task prompt the system has seen has its own
+record in the catalog. You don't pick a task prompt ID when
+submitting a request — you submit the prompt text inline and MS
+Scope **de-duplicates by text server-side**, linking your request to
+the existing record if it has seen the same text before.
+
+Task prompts are also where [prompt features](/guides/prompt-features/)
+live: feature detection runs against the task prompt record, not
+against each request, so it only happens once per distinct prompt.
+
+## Why they're separate
+
+If each request stored an independent copy of the prompt text, every
+minor wording tweak would look unrelated. By giving each distinct
+prompt text its own record, Scope can:
+
+- **Group runs** by the prompt they used, even across different
+  criteria, profiles, and agents.
+- **Cache prompt-feature extraction** so the same prompt isn't
+  re-analyzed every submission.
+- **Surface re-use** — see who's already benchmarking the same task.
+
+## Anatomy
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `_id` | string | Stable identifier (assigned by Scope). |
+| `text` | string | The full prompt text. Unique across the catalog. |
+| `features` | object | Detected prompt features (populated by extraction). |
+| `featuresExtractedAt` | string (ISO-8601) | Last extraction timestamp. |
+| `createdAt` | string (ISO-8601) | Creation timestamp. |
+
+## How records are created
+
+There are two ways a task prompt record comes into existence:
+
+- **As a side-effect of submitting a request.** The first request that
+  uses a given prompt text creates the record automatically.
+- **Explicitly**, by creating one via the API or the Portal so you can
+  trigger feature extraction or browse runs before submitting.
+
+### From the Portal
+
+Open **Tasks** in the navigation, click **New task prompt**, paste
+the text, save. The Portal opens the new record's detail page where
+you can trigger feature extraction.
+
+### From the REST API
+
+```http
+POST /api/v1/task-prompts
+Content-Type: application/json
+
+{ "text": "Create a Hello World Node.js / Express REST API." }
+```
+
+Creation is **idempotent by text** — submitting the same text returns
+the existing record rather than creating a duplicate.
+
+## Browse and search
+
+The **Tasks** page lists every task prompt. Use the search box to find
+prompts by text. Each entry links to a detail page showing the prompt
+text, detected features, and runs that referenced it.
+
+REST equivalents:
+
+```http
+GET /api/v1/task-prompts
+```
+
+```http
+GET /api/v1/task-prompts/{id}
+```
+
+## Use a task prompt in a request
+
+You don't pass a task prompt ID when submitting. Pass the prompt
+text inline:
+
+```json
+{
+  "scenario": {
+    "task": "Create a Hello World Node.js / Express REST API.",
+    "criteria": ["c-hello-world-express"]
+  },
+  "profileId": "p-550e8400-…"
+}
+```
+
+Scope looks up (or creates) the matching task prompt record and
+links it to the new request. See
+[Submitting requests (REST API)](/guides/submitting-requests-api/).
+
+## Extract prompt features
+
+Feature extraction is **on-demand**, not automatic on creation. From
+the task prompt's detail page click **Extract features**, or:
+
+```http
+POST /api/v1/task-prompts/{id}/extract-features
+```
+
+See [Working with prompt features](/guides/prompt-features/).
+
+## Soft-delete
+
+Deleting a task prompt is a soft-delete — the record is hidden from
+list views, but past requests that referenced it still resolve.
+
+```http
+DELETE /api/v1/task-prompts/{id}
+```
+
+## Tips
+
+- **Treat the catalog as shared.** Don't tweak wording on every
+  submission — each unique string creates a new record and splits
+  prompt-feature data.
+- **Don't bake configuration into the prompt text.** Things like the
+  model name, the worker, or the criteria belong on the request and
+  the profile, not in the prompt.
+- **Wait for extraction once, then move on.** Feature extraction
+  results are cached on the task prompt; you only need to re-run it
+  with `?force=true` when the catalog of features has changed and you
+  want to re-evaluate.
+
+## See also
+
+- [Submitting requests (Portal)](/guides/submitting-requests-portal/)
+- [Working with prompt features](/guides/prompt-features/)

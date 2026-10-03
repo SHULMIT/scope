@@ -26,6 +26,8 @@ import { pack as tarPack, extract as tarExtract } from "tar-stream";
 import { RestError } from "@azure/storage-blob";
 import { computeTaskPromptId } from "shared";
 
+const TEST_PROJECT_ID = "test-project";
+
 extendZodWithOpenApi(z);
 
 // ─── In-memory blob store ───────────────────────────────────────────────────
@@ -224,7 +226,7 @@ function makeTaskPromptStore() {
   const docs = new Map<string, { _id: string; text: string; createdAt: Date }>();
   return {
     docs,
-    findOrCreate: vi.fn(async (text: string) => {
+    findOrCreate: vi.fn(async (_projectId: string, text: string) => {
       const trimmed = text.trim();
       const id = computeTaskPromptId(trimmed);
       const existing = docs.get(id);
@@ -253,7 +255,6 @@ function buildApp(
     db: {} as any,
     criteriaCollection: {} as any,
     promptFeatureCollection: {} as any,
-    promptFeatureExtractionCollection: {} as any,
     reportCollection: {} as any,
     reportTemplateCollection: {} as any,
     agentCollection: {} as any,
@@ -271,13 +272,11 @@ function buildApp(
     skillRevisionStore: {} as any,
     skillResolver: {} as any,
     mcpSecretClient: null,
-    queueClients: new Map(),
     reportQueueClient: {} as any,
-    getOrCreateQueueClient: vi.fn(),
     blobStorage: {
       getLogsBlobUrl: (name: string) => blobUrl("logs", name),
     },
-    validWorkers: ["coder-acp-copilot"],
+    strictAgentCapabilities: false,
     storageConnectionString: "UseDevelopmentStorage=true",
     storageAccountName: "test",
   };
@@ -300,6 +299,7 @@ function makeFixtureRun(id = "run-fixture-1") {
   // per-attempt fields live under `run.*` (status, turns, harUrl, …).
   return {
     _id: id,
+    projectId: TEST_PROJECT_ID,
     scenario: { task: "echo hello", criteria: ["c1"] },
     workerType: "coder-acp-copilot",
     createdAt: new Date("2026-01-01T00:00:00Z"),
@@ -338,7 +338,7 @@ describe("run import/export — validation (POST /api/v1/runs/upload)", () => {
     const archive = await buildTarGz({ "orphan/junk.txt": "no run here" });
 
     const res = await request(app)
-      .post("/api/v1/runs/upload")
+      .post(`/api/v1/runs/upload?projectId=${TEST_PROJECT_ID}`)
       .attach("archive", archive, "archive.tar.gz");
 
     expect(res.status).toBe(400);
@@ -349,11 +349,11 @@ describe("run import/export — validation (POST /api/v1/runs/upload)", () => {
     const app = buildApp(makeRequestCollection());
     const archive = await buildTarGz({
       "run/run.yaml":
-        "scenario:\n  task: hi\nworkerType: coder-acp-copilot\nrun:\n  status: done\n",
+        "projectId: test-project\nscenario:\n  task: hi\nworkerType: coder-acp-copilot\nrun:\n  status: done\n",
     });
 
     const res = await request(app)
-      .post("/api/v1/runs/upload")
+      .post(`/api/v1/runs/upload?projectId=${TEST_PROJECT_ID}`)
       .attach("archive", archive, "archive.tar.gz");
 
     expect(res.status).toBe(400);
@@ -366,11 +366,11 @@ describe("run import/export — validation (POST /api/v1/runs/upload)", () => {
       // Subdir name must match the run.yaml _id — the importer enforces this
       // since blob URLs are derived from the prefix before run.yaml is parsed.
       "in-flight-1/run.yaml":
-        "_id: in-flight-1\nscenario:\n  task: t\n  criteria: []\nworkerType: coder-acp-copilot\ncreatedAt: 2026-01-01T00:00:00Z\nrun:\n  _id: in-flight-1\n  attemptNumber: 1\n  status: processing\n",
+        "_id: in-flight-1\nprojectId: test-project\nscenario:\n  task: t\n  criteria: []\nworkerType: coder-acp-copilot\ncreatedAt: 2026-01-01T00:00:00Z\nrun:\n  _id: in-flight-1\n  attemptNumber: 1\n  status: processing\n",
     });
 
     const res = await request(app)
-      .post("/api/v1/runs/upload")
+      .post(`/api/v1/runs/upload?projectId=${TEST_PROJECT_ID}`)
       .attach("archive", archive, "archive.tar.gz");
 
     expect(res.status).toBe(400);
@@ -384,11 +384,11 @@ describe("run import/export — validation (POST /api/v1/runs/upload)", () => {
 
     const archive = await buildTarGz({
       "dup-1/run.yaml":
-        "_id: dup-1\nscenario:\n  task: t\n  criteria: []\nworkerType: coder-acp-copilot\ncreatedAt: 2026-01-01T00:00:00Z\nrun:\n  _id: dup-1\n  attemptNumber: 1\n  status: done\n",
+        "_id: dup-1\nprojectId: test-project\nscenario:\n  task: t\n  criteria: []\nworkerType: coder-acp-copilot\ncreatedAt: 2026-01-01T00:00:00Z\nrun:\n  _id: dup-1\n  attemptNumber: 1\n  status: done\n",
     });
 
     const res = await request(app)
-      .post("/api/v1/runs/upload")
+      .post(`/api/v1/runs/upload?projectId=${TEST_PROJECT_ID}`)
       .attach("archive", archive, "archive.tar.gz");
 
     expect(res.status).toBe(409);
@@ -402,11 +402,11 @@ describe("run import/export — validation (POST /api/v1/runs/upload)", () => {
     // violation that the legacy presence checks would have missed.
     const archive = await buildTarGz({
       "bad/run.yaml":
-        "_id: bad-1\nscenario:\n  task: t\n  criteria: [1, 2]\nworkerType: coder-acp-copilot\ncreatedAt: 2026-01-01T00:00:00Z\nrun:\n  _id: bad-1\n  attemptNumber: 1\n  status: done\n",
+        "_id: bad-1\nprojectId: test-project\nscenario:\n  task: t\n  criteria: [1, 2]\nworkerType: coder-acp-copilot\ncreatedAt: 2026-01-01T00:00:00Z\nrun:\n  _id: bad-1\n  attemptNumber: 1\n  status: done\n",
     });
 
     const res = await request(app)
-      .post("/api/v1/runs/upload")
+      .post(`/api/v1/runs/upload?projectId=${TEST_PROJECT_ID}`)
       .attach("archive", archive, "archive.tar.gz");
 
     expect(res.status).toBe(400);
@@ -430,12 +430,12 @@ describe("run import/export — validation (POST /api/v1/runs/upload)", () => {
     const innerIterTar = await buildTarGz({ "hello.txt": "iter-1 contents" });
     const archive = await buildTarGz({
       "bad-cleanup/run.yaml":
-        "_id: bad-cleanup\nscenario:\n  task: t\n  criteria: [1, 2]\nworkerType: coder-acp-copilot\ncreatedAt: 2026-01-01T00:00:00Z\nrun:\n  _id: bad-cleanup\n  attemptNumber: 1\n  status: done\n",
+        "_id: bad-cleanup\nprojectId: test-project\nscenario:\n  task: t\n  criteria: [1, 2]\nworkerType: coder-acp-copilot\ncreatedAt: 2026-01-01T00:00:00Z\nrun:\n  _id: bad-cleanup\n  attemptNumber: 1\n  status: done\n",
       "bad-cleanup/iteration-1.tar.gz": innerIterTar,
     });
 
     const res = await request(app)
-      .post("/api/v1/runs/upload")
+      .post(`/api/v1/runs/upload?projectId=${TEST_PROJECT_ID}`)
       .attach("archive", archive, "archive.tar.gz");
 
     expect(res.status).toBe(400);
@@ -464,12 +464,12 @@ describe("run import/export — validation (POST /api/v1/runs/upload)", () => {
     const replacementIterTar = await buildTarGz({ "evil.txt": "REPLACEMENT bytes" });
     const archive = await buildTarGz({
       "dup-noclob/run.yaml":
-        "_id: dup-noclob\nscenario:\n  task: t\n  criteria: []\nworkerType: coder-acp-copilot\ncreatedAt: 2026-01-01T00:00:00Z\nrun:\n  _id: dup-noclob\n  attemptNumber: 1\n  status: done\n",
+        "_id: dup-noclob\nprojectId: test-project\nscenario:\n  task: t\n  criteria: []\nworkerType: coder-acp-copilot\ncreatedAt: 2026-01-01T00:00:00Z\nrun:\n  _id: dup-noclob\n  attemptNumber: 1\n  status: done\n",
       "dup-noclob/iteration-1.tar.gz": replacementIterTar,
     });
 
     const res = await request(app)
-      .post("/api/v1/runs/upload")
+      .post(`/api/v1/runs/upload?projectId=${TEST_PROJECT_ID}`)
       .attach("archive", archive, "archive.tar.gz");
 
     // Status may be 409 (Mongo dup wins the race) or 500 (uploadStream's
@@ -520,7 +520,7 @@ describe("run import/export — round-trip (export → import)", () => {
     const importApp = buildApp(targetReqs);
 
     const importRes = await request(importApp)
-      .post("/api/v1/runs/upload")
+      .post(`/api/v1/runs/upload?projectId=${TEST_PROJECT_ID}`)
       .attach("archive", archiveBuf, "archive.tar.gz");
 
     expect(importRes.status).toBe(201);
@@ -623,7 +623,7 @@ describe("run import/export — round-trip (export → import)", () => {
     const targetReqs = makeRequestCollection();
     const importApp = buildApp(targetReqs);
     const importRes = await request(importApp)
-      .post("/api/v1/runs/upload")
+      .post(`/api/v1/runs/upload?projectId=${TEST_PROJECT_ID}`)
       .attach("archive", archiveBuf, "archive.tar.gz");
     expect(importRes.status).toBe(201);
 
@@ -703,7 +703,7 @@ describe("run import/export — round-trip (export → import)", () => {
     const targetReqs = makeRequestCollection();
     const importApp = buildApp(targetReqs);
     const importRes = await request(importApp)
-      .post("/api/v1/runs/upload")
+      .post(`/api/v1/runs/upload?projectId=${TEST_PROJECT_ID}`)
       .attach("archive", exportRes.body, "archive.tar.gz");
     expect(importRes.status).toBe(201);
 
@@ -747,6 +747,7 @@ describe("run import/export — round-trip (export → import)", () => {
     const runId = "run-attempt-rich-1"; // ← deliberately ≠ requestId
     const fixture: any = {
       _id: requestId,
+      projectId: TEST_PROJECT_ID,
       scenario: { task: "do a thing", criteria: ["c1", "c2"] },
       workerType: "coder-acp-copilot",
       model: "claude-haiku-4.5",
@@ -862,7 +863,7 @@ describe("run import/export — round-trip (export → import)", () => {
     const targetReqs = makeRequestCollection();
     const importApp = buildApp(targetReqs);
     const importRes = await request(importApp)
-      .post("/api/v1/runs/upload")
+      .post(`/api/v1/runs/upload?projectId=${TEST_PROJECT_ID}`)
       .attach("archive", archiveBuf, "archive.tar.gz");
     expect(importRes.status).toBe(201);
 
@@ -963,6 +964,7 @@ describe("run import — task-prompt entity creation (#832)", () => {
   function makeMinimalUploadYaml(id: string, task: string, taskPromptId?: string) {
     const lines = [
       `_id: ${id}`,
+      `projectId: ${TEST_PROJECT_ID}`,
       `scenario:`,
       `  task: ${JSON.stringify(task)}`,
       `  criteria: []`,
@@ -990,12 +992,12 @@ describe("run import — task-prompt entity creation (#832)", () => {
       [`${id}/run.yaml`]: makeMinimalUploadYaml(id, task),
     });
     const res = await request(app)
-      .post("/api/v1/runs/upload")
+      .post(`/api/v1/runs/upload?projectId=${TEST_PROJECT_ID}`)
       .attach("archive", archive, "archive.tar.gz");
 
     expect(res.status).toBe(201);
     // findOrCreate was invoked with the run's scenario.task.
-    expect(taskPromptStore.findOrCreate).toHaveBeenCalledWith(task);
+    expect(taskPromptStore.findOrCreate).toHaveBeenCalledWith(TEST_PROJECT_ID, task);
     // A row now exists in the task-prompts collection at the canonical id.
     expect(taskPromptStore.docs.get(expectedId)).toMatchObject({ _id: expectedId, text: task });
     // The inserted request points at it.
@@ -1019,7 +1021,7 @@ describe("run import — task-prompt entity creation (#832)", () => {
       [`tp-reuse-1/run.yaml`]: makeMinimalUploadYaml("tp-reuse-1", task),
     });
     const res = await request(app)
-      .post("/api/v1/runs/upload")
+      .post(`/api/v1/runs/upload?projectId=${TEST_PROJECT_ID}`)
       .attach("archive", archive, "archive.tar.gz");
 
     expect(res.status).toBe(201);
@@ -1048,7 +1050,7 @@ describe("run import — task-prompt entity creation (#832)", () => {
       [`${id}/run.yaml`]: makeMinimalUploadYaml(id, task, staleId),
     });
     const res = await request(app)
-      .post("/api/v1/runs/upload")
+      .post(`/api/v1/runs/upload?projectId=${TEST_PROJECT_ID}`)
       .attach("archive", archive, "archive.tar.gz");
 
     expect(res.status).toBe(201);
@@ -1068,7 +1070,7 @@ describe("run import — task-prompt entity creation (#832)", () => {
       [`bd-3/run.yaml`]: makeMinimalUploadYaml("bd-3", task),
     });
     const res = await request(app)
-      .post("/api/v1/runs/upload-batch")
+      .post(`/api/v1/runs/upload-batch?projectId=${TEST_PROJECT_ID}`)
       .attach("archive", archive, "batch.tar.gz");
 
     expect(res.status).toBe(201);
@@ -1086,7 +1088,7 @@ describe("run import — task-prompt entity creation (#832)", () => {
 describe("batch run import (POST /api/v1/runs/upload-batch)", () => {
   it("returns 400 when no file is uploaded", async () => {
     const app = buildApp(makeRequestCollection());
-    const res = await request(app).post("/api/v1/runs/upload-batch");
+    const res = await request(app).post(`/api/v1/runs/upload-batch?projectId=${TEST_PROJECT_ID}`);
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/no archive file/i);
   });
@@ -1096,7 +1098,7 @@ describe("batch run import (POST /api/v1/runs/upload-batch)", () => {
     // Tar with only a stray top-level file — no <runId>/ subtree.
     const archive = await buildTarGz({ "stray.txt": "no run here" });
     const res = await request(app)
-      .post("/api/v1/runs/upload-batch")
+      .post(`/api/v1/runs/upload-batch?projectId=${TEST_PROJECT_ID}`)
       .attach("archive", archive, "batch.tar.gz");
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/must live under a <runId>\/ subdirectory/i);
@@ -1149,7 +1151,7 @@ describe("batch run import (POST /api/v1/runs/upload-batch)", () => {
     const targetReqs = makeRequestCollection();
     const importApp = buildApp(targetReqs);
     const importRes = await request(importApp)
-      .post("/api/v1/runs/upload-batch")
+      .post(`/api/v1/runs/upload-batch?projectId=${TEST_PROJECT_ID}`)
       .attach("archive", exportRes.body, "batch.tar.gz");
 
     expect(importRes.status).toBe(201);
@@ -1197,7 +1199,7 @@ describe("batch run import (POST /api/v1/runs/upload-batch)", () => {
 
     const importApp = buildApp(targetReqs);
     const importRes = await request(importApp)
-      .post("/api/v1/runs/upload-batch")
+      .post(`/api/v1/runs/upload-batch?projectId=${TEST_PROJECT_ID}`)
       .attach("archive", exportRes.body, "batch.tar.gz");
 
     expect(importRes.status).toBe(207);

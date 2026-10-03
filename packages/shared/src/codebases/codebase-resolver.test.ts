@@ -68,6 +68,7 @@ function arrayBufferResponse(buffer: Buffer): Response {
 function makeCodebase(overrides: Partial<CodebaseDocument> = {}): CodebaseDocument {
   return {
     _id: "codebase-1",
+    projectId: "proj-test",
     slug: "pamelafox-site",
     name: "Pamela Fox Site",
     sourceType: "git",
@@ -87,6 +88,7 @@ function makeStoreSpy() {
       const doc: CodebaseRevisionDocument = {
         ...input,
         _id: opts?.id ?? randomUUID(),
+        projectId: "proj-test",
         revisionNumber,
         ref: buildCodebaseRevisionRef(input.slug, revisionNumber),
         createdAt: new Date(),

@@ -11,6 +11,20 @@ function secretKvName(id: string): string {
   return `mcp-secret-${id}`;
 }
 
+/**
+ * Read the required `projectId` query parameter. Secrets are scoped per project
+ * ({ projectId, mcpId=slug, name }), so every route requires it. Responds 400 and
+ * returns null when absent — the API client always supplies it.
+ */
+function getProjectId(req: { query: Record<string, unknown> }, res: { status: (n: number) => { json: (b: unknown) => void } }): string | null {
+  const projectId = typeof req.query.projectId === "string" ? req.query.projectId : undefined;
+  if (!projectId) {
+    res.status(400).json({ error: "projectId query parameter is required" });
+    return null;
+  }
+  return projectId;
+}
+
 export function createMcpSecretRouter(
   secretsCollection: Collection<McpSecretDocument>,
   mcpServerCollection: Collection<McpServerDocument>,
@@ -23,6 +37,8 @@ export function createMcpSecretRouter(
   // ──────────────────────────────────────────────────────────────────────────
   router.post("/api/v1/mcp/servers/:id/secrets", async (req, res, next) => {
     try {
+      const projectId = getProjectId(req, res);
+      if (!projectId) return;
       const mcpId = req.params.id;
       const { name, value } = req.body as { name?: string; value?: string };
 
@@ -35,7 +51,7 @@ export function createMcpSecretRouter(
         return;
       }
 
-      const existing = await secretsCollection.findOne({ mcpId, name });
+      const existing = await secretsCollection.findOne({ projectId, mcpId, name });
       const now = new Date();
 
       if (existing) {
@@ -48,7 +64,7 @@ export function createMcpSecretRouter(
         const newId = new ObjectId().toHexString();
         const kvName = secretKvName(newId);
         await store.setSecret(kvName, value);
-        const doc: McpSecretDocument = { _id: newId, mcpId, name, createdAt: now, updatedAt: now };
+        const doc: McpSecretDocument = { _id: newId, projectId, mcpId, name, createdAt: now, updatedAt: now };
         try {
           await secretsCollection.insertOne(doc as any);
         } catch (err) {
@@ -67,8 +83,10 @@ export function createMcpSecretRouter(
   // ──────────────────────────────────────────────────────────────────────────
   router.get("/api/v1/mcp/servers/:id/secrets", async (req, res, next) => {
     try {
+      const projectId = getProjectId(req, res);
+      if (!projectId) return;
       const mcpId = req.params.id;
-      const docs = await secretsCollection.find({ mcpId }).toArray();
+      const docs = await secretsCollection.find({ projectId, mcpId }).toArray();
       res.json(docs.map((d) => ({
         id: d._id,
         mcpId: d.mcpId,
@@ -88,15 +106,23 @@ export function createMcpSecretRouter(
   // ──────────────────────────────────────────────────────────────────────────
   router.get("/api/v1/mcp/servers/:id/secrets/resolve", async (req, res, next) => {
     try {
+      const projectId = getProjectId(req, res);
+      if (!projectId) return;
       const mcpId = req.params.id;
 
-      const server = await mcpServerCollection.findOne({ _id: mcpId, deletedAt: { $exists: false } });
+      // Server slug is reused across projects, so resolve within the project.
+      // `slug` is the post-027 reference key; fall back to `_id` for pre-migration rows.
+      const server = await mcpServerCollection.findOne({
+        projectId,
+        $or: [{ slug: mcpId }, { _id: mcpId }],
+        deletedAt: { $exists: false },
+      });
       if (!server) {
         res.status(404).json({ error: "MCP server not found" });
         return;
       }
 
-      const docs = await secretsCollection.find({ mcpId }).toArray();
+      const docs = await secretsCollection.find({ projectId, mcpId }).toArray();
 
       if (server.type === "stdio") {
         const env: Record<string, string> = {};
@@ -122,9 +148,11 @@ export function createMcpSecretRouter(
   // ──────────────────────────────────────────────────────────────────────────
   router.delete("/api/v1/mcp/servers/:id/secrets/:name", async (req, res, next) => {
     try {
+      const projectId = getProjectId(req, res);
+      if (!projectId) return;
       const { id: mcpId, name } = req.params;
 
-      const doc = await secretsCollection.findOne({ mcpId, name });
+      const doc = await secretsCollection.findOne({ projectId, mcpId, name });
       if (!doc) {
         res.status(404).json({ error: "Secret not found" });
         return;

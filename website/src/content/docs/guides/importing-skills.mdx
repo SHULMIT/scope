@@ -1,0 +1,226 @@
+---
+title: Importing skills
+description: Import Copilot agent skills into Scope so they can be used in profiles and runs.
+---
+
+Before you can reference a skill in a
+[profile](/guides/defining-profiles/) or an inline run, it must be
+**imported** into Scope. Importing registers the skill, fetches
+its `SKILL.md` from GitHub, and stores an archive so runs get
+a reproducible snapshot.
+
+Skills must conform to the
+[Agent Skills specification](https://agentskills.io/specification).
+Each skill is a directory containing a `SKILL.md` file with YAML
+frontmatter and Markdown instructions. See
+[Skill format reference](#skill-format-reference) at the bottom
+of this page for the full schema.
+
+## Where skills come from
+
+A skill lives in a GitHub repository, inside a well-known
+directory. The repository can host many skills — each in its
+own sub-folder. Scope looks in these paths when resolving
+a skill:
+
+- `skills/`
+- `.agents/skills/`
+- `.github/skills/`
+- `.claude/skills/`
+- `.copilot/skills/`
+- `.roo/skills/`
+- `.cursor/skills/`
+- the repository root
+
+A skill is identified by two parts:
+
+| Part | Example | Description |
+| --- | --- | --- |
+| `source` | `vercel-labs/agent-skills` | The GitHub `owner/repo` that hosts the skill. |
+| `skillName` | `vercel-react-best-practices` | The directory name inside one of the well-known paths. |
+
+Together they form the skill **slug**:
+`vercel-labs/agent-skills/vercel-react-best-practices`.
+
+## Import from the Portal
+
+### Search the skills registry
+
+1. Open **Skills** in the Portal sidebar.
+2. In the **Import Skill** card, type a search term (e.g.
+   "react", "azure").
+3. Results come from two sources — skills already imported
+   into your Scope instance (marked **internal**) and the
+   external [skills.sh](https://skills.sh) registry.
+4. Click a result to import it.
+
+Scope saves the skill record and automatically resolves the
+latest revision from GitHub. If auto-resolution fails (private
+repo, rate limit, etc.) the skill is still saved — you can
+retry later.
+
+### Add a skill manually
+
+If the skill you need isn't in the registry, use the
+multi-step import wizard:
+
+1. On the **Skills** page, click **Import manually**.
+2. Enter the **source** repository (`owner/repo`) and
+   submit. Scope scans the repository for all skills
+   located in the well-known paths.
+3. The wizard presents every skill found in the repo.
+   Skills already imported into your instance are marked
+   and show whether an upgrade is available.
+4. Select the skills you want to import (or upgrade),
+   then confirm. Scope creates the skill records and
+   attempts auto-resolution from GitHub for each one.
+
+## Import via the REST API
+
+```http
+POST /api/v1/skills
+Content-Type: application/json
+
+{
+  "source": "vercel-labs/agent-skills",
+  "skillName": "vercel-react-best-practices",
+  "name": "React Best Practices",
+  "origin": "manual"
+}
+```
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `source` | string | yes | GitHub `owner/repo`. |
+| `skillName` | string | yes | Skill directory name in the repo. |
+| `name` | string | yes | Human-readable display name (1–64 chars). |
+| `description` | string | no | Free-form description. |
+| `origin` | string | yes | `"manual"` for hand-entered skills, `"skills-sh"` for imports from the registry. |
+
+The API returns **201** for a new import or **200** if the skill
+already exists (upsert). After saving, Scope auto-resolves
+the latest revision from GitHub in the background.
+
+## What happens during resolution
+
+When a skill is imported (or when you trigger resolution
+manually), Scope:
+
+1. Searches the GitHub repository for the skill directory in
+   the well-known paths listed above.
+2. Finds the **latest commit** that touched that directory.
+3. Downloads `SKILL.md` and any supporting files.
+4. Parses the YAML frontmatter (`name`, `description`,
+   `license`, `compatibility`, `allowedTools`).
+5. Packages the files into a `.tar.gz` archive and uploads
+   it to blob storage.
+6. Stores a **skill revision** record keyed by
+   `source/skillName@commitHash`.
+
+The commit hash makes the revision **immutable** — the same
+ref always points to the same code.
+
+### Retry failed resolution
+
+If auto-resolution failed at import time you can retry from
+the Portal (click **Resolve** on the skill detail page) or
+via the API:
+
+```http
+POST /api/v1/skills/vercel-labs/agent-skills/vercel-react-best-practices/resolve
+```
+
+## Using an imported skill
+
+Once imported, the skill appears in the **skill picker**
+wherever you configure a profile or submit a run. You can
+select it and optionally pin a specific revision (commit hash).
+
+In JSON payloads, reference it in the `skillRevisions` array:
+
+```json
+{
+  "skillRevisions": [
+    "vercel-labs/agent-skills/vercel-react-best-practices"
+  ]
+}
+```
+
+Unpinned references are resolved to the latest commit at
+profile-version or run-creation time and stored in their
+pinned form (`slug@commitHash`). See
+[Using MCP servers, skills & extensions → Skills](/guides/mcp-skills-extensions/#skills)
+for details on pinning and delivery.
+
+## Deleting a skill
+
+From the Portal, click the **delete** icon on the Skills list.
+Via the API:
+
+```http
+DELETE /api/v1/skills/vercel-labs/agent-skills/vercel-react-best-practices
+```
+
+Deletion is a **soft delete** (HTTP 204). The skill and its
+revisions are hidden but not destroyed. Existing runs that
+used the skill are unaffected.
+
+## Skill format reference
+
+Scope supports the
+[Agent Skills specification](https://agentskills.io/specification).
+A skill is a directory whose name matches the skill `name`,
+containing at minimum a `SKILL.md` file:
+
+```
+my-skill/
+├── SKILL.md          # Required: metadata + instructions
+├── scripts/          # Optional: executable code
+├── references/       # Optional: documentation
+├── assets/           # Optional: templates, resources
+└── ...
+```
+
+### `SKILL.md`
+
+The file starts with YAML frontmatter followed by a Markdown
+body containing the agent instructions:
+
+```yaml
+---
+name: my-skill
+description: What this skill does and when to use it.
+---
+
+Step-by-step instructions for the agent.
+```
+
+**Required fields:**
+
+| Field | Constraints |
+| --- | --- |
+| `name` | 1–64 chars, lowercase alphanumeric + hyphens, no leading/trailing/consecutive hyphens. Must match the parent directory name. |
+| `description` | 1–1 024 chars. Describes what the skill does and when to activate it. |
+
+**Optional fields:**
+
+| Field | Constraints |
+| --- | --- |
+| `license` | License name or reference to a bundled license file. |
+| `compatibility` | 1–500 chars. Environment requirements (intended product, system packages, network access). |
+| `metadata` | Arbitrary string key-value map for additional properties. |
+| `allowed-tools` | Space-separated tool names the skill may use (experimental). |
+
+The Markdown body after the frontmatter is loaded when the
+agent activates the skill. Keep it under 500 lines; move
+detailed reference material into files under `references/`.
+
+For the complete specification — including progressive
+disclosure, file referencing, and validation — see
+[agentskills.io/specification](https://agentskills.io/specification).
+
+## See also
+
+- [Using MCP servers, skills & extensions](/guides/mcp-skills-extensions/)
+- [Defining profiles](/guides/defining-profiles/)
+- [Profile schema → `skillRevisions`](/reference/profile-schema/#skillrevisions)

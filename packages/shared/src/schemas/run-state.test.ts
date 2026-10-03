@@ -74,6 +74,7 @@ describe("RunHistoryDocumentSchema", () => {
     const parsed = RunHistoryDocumentSchema.parse({
       _id: "run-6",
       requestId: "req-1",
+      projectId: "proj-1",
       attemptNumber: 1,
       status: "done",
       outcome: "failed",

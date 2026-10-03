@@ -72,6 +72,12 @@ export interface MultiTurnConfig {
    * therefore blob paths `iteration-N/...`) stay globally unique. Defaults to 0.
    */
   iterationOffset?: number;
+  /**
+   * The run's project. Threaded to the judge so its criteria resolution is
+   * scoped to that project (per-project catalog isolation). Absent ⇒ the judge
+   * falls back to global/unscoped criteria (legacy).
+   */
+  projectId?: string;
 }
 
 export interface MultiTurnResult {
@@ -117,6 +123,7 @@ export async function runMultiTurnLoop(
     workspacePath,
     gate,
     iterationOffset = 0,
+    projectId,
   } = config;
 
   // Defensive: criteria is required when maxIterations > 1
@@ -453,6 +460,7 @@ export async function runMultiTurnLoop(
         iteration,
         ...(gate && { gate }),
         ...(turnToolCallsUrl && { toolCallsUrl: turnToolCallsUrl }),
+        ...(projectId && { projectId }),
         ...(codingResponse && { currentAgentResponse: codingResponse }),
       });
       judgePassed = judgeResult.passed;

@@ -16,6 +16,7 @@ import {
   TokenManagerClient,
   type VisibilityHeartbeat,
 } from "shared";
+import { trackMetric, trackEvent } from "telemetry";
 import { createReportTools } from "./tools.js";
 import { REPORT_SYSTEM_PROMPT, withRetry } from "shared";
 
@@ -28,6 +29,31 @@ export interface ReportQueueProcessorConfig extends BaseQueueProcessorConfig {
   sessionTimeoutMs?: number;
 }
 
+export interface ResolvedReportPrompts {
+  userPrompt: string;
+  systemPrompt: string;
+}
+
+export function resolveReportPrompts(
+  template: Pick<ReportTemplateDocument, "userPrompt" | "systemPrompt">,
+  requestId: string,
+): ResolvedReportPrompts {
+  const userPrompt = template.userPrompt.replace(
+    /\{\{requestId\}\}|\{requestId\}/g,
+    requestId,
+  );
+  if (!template.systemPrompt) {
+    return { userPrompt, systemPrompt: REPORT_SYSTEM_PROMPT };
+  }
+  if (template.systemPrompt.mode === "override") {
+    return { userPrompt, systemPrompt: template.systemPrompt.content };
+  }
+  return {
+    userPrompt,
+    systemPrompt: `${REPORT_SYSTEM_PROMPT}\n\n${template.systemPrompt.content}`,
+  };
+}
+
 /**
  * Queue processor for LLM-generated run reports.
  *
@@ -38,6 +64,7 @@ export interface ReportQueueProcessorConfig extends BaseQueueProcessorConfig {
 export class ReportQueueProcessor extends BaseQueueProcessor<ReportDocument> {
   private reportConfig: ReportQueueProcessorConfig;
   private tokenClient: TokenManagerClient;
+  private static coldStartTracked = false;
 
   constructor(config: ReportQueueProcessorConfig) {
     super(config, "report-generator");
@@ -58,9 +85,16 @@ export class ReportQueueProcessor extends BaseQueueProcessor<ReportDocument> {
     heartbeat: VisibilityHeartbeat,
     log: (level: LogEvent["level"], msg: string, data?: Record<string, unknown>) => Promise<void>
   ): Promise<void> {
+    const generationStart = Date.now();
     const reportId = doc._id;
     const requestId = doc.requestId;
 
+    if (!ReportQueueProcessor.coldStartTracked) {
+      ReportQueueProcessor.coldStartTracked = true;
+      trackMetric({ name: "report_generator.cold_start_ms", value: process.uptime() * 1000, properties: { service: "report-generator" } });
+    }
+
+    trackEvent({ name: "report_generator.generation_started", properties: { requestId, reportId, templateId: doc.templateId || "unknown" } });
     await log("info", `Starting report generation for run ${requestId}`);
 
     // --- Prepare snapshots temp directory ---
@@ -83,7 +117,7 @@ export class ReportQueueProcessor extends BaseQueueProcessor<ReportDocument> {
         throw new Error(`Report ${reportId} has no templateId — reports without a template are no longer supported`);
       }
 
-      const template = await this.fetchReportTemplate(doc.templateId);
+      const template = await this.fetchReportTemplate(doc.templateId, doc.projectId);
       if (!template) {
         throw new Error(`Report template '${doc.templateId}' not found for report ${reportId}`);
       }
@@ -117,23 +151,14 @@ export class ReportQueueProcessor extends BaseQueueProcessor<ReportDocument> {
 
       await log("info", `Reporter: ${reporter.agentId}@${reporter.agentVersion}, model: ${reporter.model}`);
 
-      const resolvedUserPrompt = template.userPrompt.replace(/\{\{requestId\}\}|\{requestId\}/g, requestId);
-
-      // Resolve system prompt
-      let resolvedSystemPrompt: string;
-      if (template.systemPrompt) {
-        if (template.systemPrompt.mode === "override") {
-          resolvedSystemPrompt = template.systemPrompt.content;
-        } else {
-          // mode === "append"
-          resolvedSystemPrompt = REPORT_SYSTEM_PROMPT + "\n\n" + template.systemPrompt.content;
-        }
-      } else {
-        resolvedSystemPrompt = REPORT_SYSTEM_PROMPT;
-      }
+      const {
+        userPrompt: resolvedUserPrompt,
+        systemPrompt: resolvedSystemPrompt,
+      } = resolveReportPrompts(template, requestId);
 
       // --- Run Copilot SDK session ---
       const resolvedTimeoutMs = template.timeoutMs ?? this.reportConfig.sessionTimeoutMs ?? 5 * 60 * 1000;
+      const llmStart = Date.now();
       const content = await this.runCopilotSession(
         tools,
         resolvedUserPrompt,
@@ -142,6 +167,7 @@ export class ReportQueueProcessor extends BaseQueueProcessor<ReportDocument> {
         resolvedTimeoutMs,
         log
       );
+      trackMetric({ name: "report_generator.llm_session_duration_ms", value: Date.now() - llmStart, properties: { service: "report-generator" } });
 
       // --- Persist report content ---
       await withRetry(() => this.collection.updateOne(
@@ -156,6 +182,8 @@ export class ReportQueueProcessor extends BaseQueueProcessor<ReportDocument> {
       ));
 
       await log("info", `Report completed (${content.length} chars)`, { final: true });
+      trackMetric({ name: "report_generator.generation_duration_ms", value: Date.now() - generationStart, properties: { service: "report-generator" } });
+      trackEvent({ name: "report_generator.generation_completed", properties: { requestId, reportId } });
     } finally {
       // Clean up extracted snapshot files
       if (existsSync(snapshotsDir)) {
@@ -320,21 +348,27 @@ export class ReportQueueProcessor extends BaseQueueProcessor<ReportDocument> {
   }
 
   /**
-   * Fetch a report template from the API by its slug ID.
-   * Returns null if the template is not found or on error.
+   * Fetch a report template from the API by its slug ID, scoped to the report's
+   * project. Report templates are project-scoped, so the slug `id` is only
+   * unique within a project; the `?projectId=` query param is required for the
+   * lookup to resolve (the API 4xxs a slug-only request). Returns null if the
+   * template is not found or on error.
    */
-  private async fetchReportTemplate(templateId: string): Promise<ReportTemplateDocument | null> {
+  private async fetchReportTemplate(
+    templateId: string,
+    projectId: string
+  ): Promise<ReportTemplateDocument | null> {
     try {
       const response = await fetch(
-        `${this.reportConfig.apiBaseUrl}/api/v1/report-templates/${encodeURIComponent(templateId)}`
+        `${this.reportConfig.apiBaseUrl}/api/v1/report-templates/${encodeURIComponent(templateId)}?projectId=${encodeURIComponent(projectId)}`
       );
       if (!response.ok) {
-        console.warn(`[report-generator] Failed to fetch template '${templateId}': ${response.status}`);
+        console.warn(`[report-generator] Failed to fetch template '${templateId}' (project ${projectId}): ${response.status}`);
         return null;
       }
       return await response.json() as ReportTemplateDocument;
     } catch (error) {
-      console.warn(`[report-generator] Error fetching template '${templateId}': ${error}`);
+      console.warn(`[report-generator] Error fetching template '${templateId}' (project ${projectId}): ${error}`);
       return null;
     }
   }

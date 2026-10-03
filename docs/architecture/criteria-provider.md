@@ -218,3 +218,18 @@ references), so only a genuine cycle rejects the whole batch with `400`.
 > Reads (`GET /api/v1/criteria`, `/graph`, `/:id`) and unrelated endpoints
 > (`/generate-prompt`, `/mdp`) remain inline — they carry no write-time
 > invariants. Only the four write paths route through `CriteriaStore`.
+
+### Project scoping — the by-id invariant
+
+Criteria are **project-scoped** entities, so `CriteriaStore` obeys the project-wide by-id
+invariant (see
+[app-design.md](app-design.md#never-a-global-slug-only-action-on-a-project-scoped-entity-the-by-id-invariant)):
+**a criterion is never read, edited, or soft-deleted by its `id` alone.** Every get/update/delete
+filters by `{ projectId, id }`, and `dependsOn` edges resolve **within the same `projectId`** so a
+dependency can never cross projects. `projectId` comes from context where available — the judge
+threads the run's `projectId` into `getCriteriaProvider(projectId)` /
+`RestApiCriteriaProvider` (which appends `?projectId=`), and the API routes bind
+`getCriteriaStore(projectId)`. A by-id criteria route called **without** a resolvable `projectId`
+fails **400** rather than falling back to a global `findOne({ id })`. `POST /generate-prompt`
+(criteria and prompt-features) is intentionally left with an *optional* `projectId` — it generates
+rather than acting on a single stored entity — and is called out as such in the OpenAPI schema.

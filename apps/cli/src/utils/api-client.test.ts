@@ -44,6 +44,14 @@ describe("apiFetch URL handling", () => {
     resetApiClient();
   });
 
+  it.each([undefined, "", "  "])("rejects missing URL %j before any network request", async (url) => {
+    const mock = vi.fn();
+    vi.stubGlobal("fetch", mock);
+
+    await expect(apiFetch(url, "/projects")).rejects.toThrow("No API URL configured");
+    expect(mock).not.toHaveBeenCalled();
+  });
+
   it("joins base + path and normalizes trailing slashes", async () => {
     const mock = vi.fn().mockResolvedValue(okJson());
     vi.stubGlobal("fetch", mock);
@@ -441,5 +449,72 @@ describe("readApiError", () => {
   it("falls back to status text for non-JSON bodies", async () => {
     const err = await readApiError(new Response("oops", { status: 500, statusText: "Internal Server Error" }));
     expect(err.message).toBe("Internal Server Error");
+  });
+});
+
+describe("apiFetch projectId scoping", () => {
+  beforeEach(() => {
+    resetApiClient();
+    delete process.env.SCOPE_TOKEN;
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetApiClient();
+  });
+
+  it("appends ?projectId when the path has no query string", async () => {
+    const mock = vi.fn().mockResolvedValue(okJson());
+    vi.stubGlobal("fetch", mock);
+
+    await apiFetch("http://localhost:3100", "/requests", { projectId: "proj-1" });
+
+    expect(reqOf(mock).url).toBe("http://localhost:3100/api/v1/requests?projectId=proj-1");
+  });
+
+  it("appends &projectId when the path already has a query string", async () => {
+    const mock = vi.fn().mockResolvedValue(okJson());
+    vi.stubGlobal("fetch", mock);
+
+    await apiFetch("http://localhost:3100", "/requests?worker=copilot", { projectId: "proj-1" });
+
+    expect(reqOf(mock).url).toBe("http://localhost:3100/api/v1/requests?worker=copilot&projectId=proj-1");
+  });
+
+  it("URL-encodes the project id", async () => {
+    const mock = vi.fn().mockResolvedValue(okJson());
+    vi.stubGlobal("fetch", mock);
+
+    await apiFetch("http://localhost:3100", "/criteria", { projectId: "a b/c" });
+
+    expect(reqOf(mock).url).toBe("http://localhost:3100/api/v1/criteria?projectId=a%20b%2Fc");
+  });
+
+  it("omits projectId when it is undefined or blank", async () => {
+    const mock = vi.fn().mockResolvedValue(okJson());
+    vi.stubGlobal("fetch", mock);
+
+    await apiFetch("http://localhost:3100", "/criteria");
+    await apiFetch("http://localhost:3100", "/criteria", { projectId: "   " });
+
+    expect(reqOf(mock, 0).url).toBe("http://localhost:3100/api/v1/criteria");
+    expect(reqOf(mock, 1).url).toBe("http://localhost:3100/api/v1/criteria");
+  });
+
+  it("does not leak projectId into the request init (headers/body)", async () => {
+    const mock = vi.fn().mockResolvedValue(okJson());
+    vi.stubGlobal("fetch", mock);
+
+    await apiFetch("http://localhost:3100", "/requests", {
+      method: "POST",
+      body: JSON.stringify({ hello: "world" }),
+      projectId: "proj-1",
+    });
+
+    const req = reqOf(mock);
+    // projectId rides the query string, never a header, and the resource path
+    // (before the query) is untouched.
+    expect(req.headers.has("projectId")).toBe(false);
+    expect(req.url).toBe("http://localhost:3100/api/v1/requests?projectId=proj-1");
+    expect(req.method).toBe("POST");
   });
 });

@@ -9,7 +9,8 @@ import { configureHelp } from "../utils/helpFormatter.js";
 import { criterionIcon, dimTimestamp, errorText, successText, label, value, warnBanner } from "../utils/style.js";
 import { formatData, isMachineReadable } from "../utils/formatters.js";
 import type { OutputFormat, DisplayField } from "../utils/types.js";
-import { withOutputOption, getDefaultApiUrl } from "../utils/shared.js";
+import { withOutputOption, withProjectOption, getDefaultApiUrl } from "../utils/shared.js";
+import { requireProjectId } from "../utils/config.js";
 import { apiFetch } from "../utils/api-client.js";
 import { parsePromptTypeOption, type PromptType } from "../utils/gates.js";
 
@@ -25,7 +26,7 @@ const taskPrompt = program
 
 configureHelp(taskPrompt);
 
-withOutputOption(
+withProjectOption(withOutputOption(
 taskPrompt
   .command("list")
   .description("List all task prompts")
@@ -34,9 +35,10 @@ taskPrompt
   .option("-l, --limit <n>", "Maximum number of results", "50")
   .option("--offset <n>", "Number of results to skip", "0")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
-)
+))
   .action(async (options) => {
     const format = (options.output || 'table') as OutputFormat;
+    const projectId = requireProjectId(options.project);
     try {
       const params = new URLSearchParams();
       if (options.search) params.set("search", options.search);
@@ -45,7 +47,7 @@ taskPrompt
       if (options.limit) params.set("limit", options.limit);
       if (options.offset) params.set("offset", options.offset);
       const qs = params.toString();
-      const response = await apiFetch(options.url, `/task-prompts${qs ? `?${qs}` : ""}`);
+      const response = await apiFetch(options.url, `/task-prompts${qs ? `?${qs}` : ""}`, { projectId });
 
       if (!response.ok) {
         const error = await response.json();
@@ -188,8 +190,10 @@ taskPrompt
   .option("-f, --file <path>", "Read task prompt text from file")
   .option("--type <type>", "Prompt type/gate", "select")
   .option("-u, --url <url>", "API base URL", getDefaultApiUrl())
+  .option("--project <id>", "Project ID for scoped operations (overrides SCOPE_PROJECT and the saved selection)")
   .action(async (options) => {
     try {
+      const projectId = requireProjectId(options.project);
       let text = options.text;
       if (!text && options.file) {
         const absPath = resolve(options.file);
@@ -209,6 +213,7 @@ taskPrompt
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text, type }),
+        projectId,
       });
 
       if (!response.ok) {

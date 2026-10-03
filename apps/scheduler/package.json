@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "shared": "workspace:*",
+    "telemetry": "workspace:*",
     "@azure/identity": "^4.5.0",
     "@azure/storage-queue": "^12.24.0",
     "dotenv": "^16.4.5",

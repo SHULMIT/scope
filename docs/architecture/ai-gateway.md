@@ -495,8 +495,6 @@ env:
     value: "http://<sessionId>@gateway-service.scoped.svc.cluster.local:18000"
 ```
 
-**Manifests:** [`deploy/base/gateway.yaml`](../../deploy/base/gateway.yaml), [`deploy/base/gateway-config.yaml`](../../deploy/base/gateway-config.yaml)
-
 ## Future Plugins
 
 | Phase | Plugin | Status | Purpose |

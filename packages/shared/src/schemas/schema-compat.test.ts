@@ -37,7 +37,6 @@ import {
   PromptFeatureResponseSchema,
   PromptFeatureResultSchema,
   SuggestedPromptFeatureSchema,
-  PromptFeatureExtractionResponseSchema,
   TaskPromptResponseSchema,
   FeatureFlagResponseSchema,
   McpTransportTypeSchema,
@@ -72,7 +71,6 @@ import type {
   PromptFeatureDocument,
   PromptFeatureResult,
   SuggestedPromptFeature,
-  PromptFeatureExtraction,
   TaskPromptDocument,
   FeatureFlagDocument,
   ReportTrigger,
@@ -133,7 +131,6 @@ type InferredCriteriaResponse = z.infer<typeof CriteriaResponseSchema>;
 type InferredPromptFeatureResponse = z.infer<typeof PromptFeatureResponseSchema>;
 type InferredPromptFeatureResult = z.infer<typeof PromptFeatureResultSchema>;
 type InferredSuggestedPromptFeature = z.infer<typeof SuggestedPromptFeatureSchema>;
-type InferredPromptFeatureExtraction = z.infer<typeof PromptFeatureExtractionResponseSchema>;
 type InferredTaskPromptResponse = z.infer<typeof TaskPromptResponseSchema>;
 type InferredFeatureFlagResponse = z.infer<typeof FeatureFlagResponseSchema>;
 type InferredMcpTransportType = z.infer<typeof McpTransportTypeSchema>;

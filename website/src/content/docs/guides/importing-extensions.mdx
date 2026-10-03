@@ -1,0 +1,161 @@
+---
+title: Importing VS Code extensions
+description: Add VS Code extensions to your Scope deployment so they can be used in profiles and runs.
+---
+
+Before you can reference a VS Code extension in a
+[profile](/guides/defining-profiles/) or a run, it must be
+**imported** into your Scope deployment. Importing registers
+the extension's marketplace ID and metadata so that Scope
+can resolve and install it when a run starts.
+
+Extensions are only used by the **VS Code Copilot** coding
+CLI and Claude Code CLI agents do not support extensions — see
+[Choosing a coding agent](/guides/choosing-a-coding-agent/).
+
+## Extension IDs
+
+Every VS Code extension has a marketplace ID in the form
+`{publisher}.{name}`:
+
+```
+ms-python.python
+esbenp.prettier-vscode
+dbaeumer.vscode-eslint
+```
+
+This ID is shown on the extension's
+[Visual Studio Marketplace](https://marketplace.visualstudio.com/)
+page and in the VS Code extension panel. Scope uses it as
+the primary key for imported extensions.
+
+## Importing from the Portal
+
+1. Open **Extensions** in the navigation.
+2. Use the **search box** to find the extension you want. The
+   search queries both your already-imported extensions and the
+   VS Code Marketplace in one go.
+3. Results from the Marketplace that are not yet imported show
+   an **Import** button. Click it.
+4. The extension is registered and immediately available for use
+   in profiles.
+
+The Portal also lets you pick a specific version when importing.
+By default the latest stable version is shown.
+
+## Importing from the REST API
+
+Use `POST /api/v1/extensions` to import an extension
+programmatically:
+
+```http
+POST /api/v1/extensions
+Content-Type: application/json
+
+{
+  "_id": "ms-python.python",
+  "publisher": "ms-python",
+  "name": "Python",
+  "description": "Python language support with Pylance, debugging, and more",
+  "origin": "marketplace"
+}
+```
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `_id` | ✅ | Marketplace ID (`{publisher}.{name}`). |
+| `publisher` | ✅ | Publisher identifier (the part before the dot). |
+| `name` | ✅ | Human-readable display name. |
+| `description` | — | Optional description. |
+| `origin` | ✅ | `"marketplace"` if discovered via search, `"manual"` if entered by hand. |
+
+If the extension was previously soft-deleted, importing it again
+restores it.
+
+## Searching for extensions
+
+Before importing, you can search both your internal list and the
+VS Code Marketplace:
+
+Type in the search box on the **Extensions** page in the Portal.
+Results are split into **Imported** (already in your deployment)
+and **VS Code Marketplace** sections.
+
+You can also search programmatically:
+
+```http
+GET /api/v1/extensions/search?q=python&limit=10
+```
+
+Each result includes an `internal` flag (`true` if already
+imported).
+
+## Listing imported extensions
+
+```http
+GET /api/v1/extensions
+```
+
+## Browsing available versions
+
+Once an extension is imported, you can query the Marketplace for
+available versions:
+
+```http
+GET /api/v1/extensions/ms-python.python/versions
+```
+
+Add `?preRelease=true` to include pre-release versions.
+
+## Deleting an extension
+
+Deleting an extension is a **soft-delete** — it disappears from
+list views and can no longer be added to new profiles, but past
+runs that used it still resolve correctly.
+
+```http
+DELETE /api/v1/extensions/ms-python.python
+```
+
+## Using imported extensions in profiles
+
+After importing, reference extensions in a profile's
+`extensions` array. You can optionally pin a specific version
+with `@`:
+
+```json
+{
+  "extensions": [
+    "ms-python.python",
+    "esbenp.prettier-vscode@10.4.0"
+  ]
+}
+```
+
+- **Unpinned** IDs (e.g. `ms-python.python`) resolve to the
+  latest stable version at profile-version creation time.
+- **Pinned** IDs (e.g. `esbenp.prettier-vscode@10.4.0`) are
+  used as-is.
+
+For more on how extensions fit into profiles, see
+[Defining profiles](/guides/defining-profiles/) and
+[Using MCP servers, skills & extensions](/guides/mcp-skills-extensions/).
+
+## Tips
+
+- **Import before you profile.** Extensions must be in the
+  internal list before they can appear in a profile. Search and
+  import first, then create the profile.
+- **Pin versions for reproducible benchmarks.** Unpinned
+  extensions resolve to "latest" — fine for exploration, risky
+  for long-lived comparisons.
+- **One extension at a time.** There's no bulk-import endpoint.
+  Script multiple `POST /api/v1/extensions` calls if you need
+  to import several at once.
+
+## See also
+
+- [Using MCP servers, skills & extensions](/guides/mcp-skills-extensions/)
+- [Defining profiles](/guides/defining-profiles/)
+- [Choosing a coding agent](/guides/choosing-a-coding-agent/)
+- [Coding agents & capabilities reference](/reference/workers/)

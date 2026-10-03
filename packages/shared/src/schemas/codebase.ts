@@ -60,6 +60,7 @@ export const CodebaseResponseSchema = z
     createdAt: z.coerce.date(),
     updatedAt: z.coerce.date().optional(),
     deletedAt: z.coerce.date().optional(),
+    projectId: z.string(),
   })
   .openapi("CodebaseResponse");
 
@@ -89,5 +90,6 @@ export const CodebaseRevisionResponseSchema = z
      * resolve/upload responses; absent when listing/fetching revisions.
      */
     deduplicated: z.boolean().optional(),
+    projectId: z.string(),
   })
   .openapi("CodebaseRevisionResponse");

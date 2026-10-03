@@ -282,4 +282,55 @@ describe("McpGatewayClient", () => {
       expect(mockFetch).toHaveBeenCalledTimes(1); // only the listServers call
     });
   });
+
+  // ─── §13.6.1 cross-project isolation (sequential, same slug, different config) ─
+  describe("sequential same-slug/different-project isolation", () => {
+    /**
+     * Drives a stateful in-memory gateway registry through mockFetch so we can
+     * observe exactly what the gateway holds after each run's setup(). Models the
+     * MCPJungle sidecar keyed by bare server name (= slug).
+     */
+    function stubStatefulGateway() {
+      const registry = new Map<string, string>(); // name -> url
+      mockFetch.mockImplementation(async (url: string, init?: any) => {
+        const method = init?.method ?? "GET";
+        const path = url.replace("http://localhost:8080", "").split("?")[0];
+        if (path === "/api/v0/servers" && method === "GET") {
+          return okResponse([...registry.keys()].map((name) => ({ name })));
+        }
+        if (path === "/api/v0/servers" && method === "POST") {
+          const body = JSON.parse(init.body);
+          registry.set(body.name, body.url); // force=true overwrites
+          return okResponse();
+        }
+        if (path.startsWith("/api/v0/servers/") && method === "DELETE") {
+          registry.delete(decodeURIComponent(path.slice("/api/v0/servers/".length)));
+          return okResponse();
+        }
+        return okResponse();
+      });
+      return registry;
+    }
+
+    /** Mirrors a worker run's setup(): clean slate, then register that run's config. */
+    async function runSetup(cfg: McpServerConfig) {
+      await client.purgeAll();
+      await client.registerServer(cfg);
+    }
+
+    it("never lets two projects' same-slug servers co-inhabit the gateway", async () => {
+      const registry = stubStatefulGateway();
+
+      // Run in project P: slug 'ms-learn' pointing at P's URL.
+      await runSetup({ slug: "ms-learn", name: "MS Learn", type: "http", url: "https://p.example/mcp" });
+      expect([...registry.entries()]).toEqual([["ms-learn", "https://p.example/mcp"]]);
+
+      // Run in project Q: SAME slug, DIFFERENT url. purgeAll() must evict P's copy first.
+      await runSetup({ slug: "ms-learn", name: "MS Learn", type: "http", url: "https://q.example/mcp" });
+
+      // The gateway holds exactly one 'ms-learn' — Q's config, never P's.
+      expect(registry.size).toBe(1);
+      expect(registry.get("ms-learn")).toBe("https://q.example/mcp");
+    });
+  });
 });

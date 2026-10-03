@@ -113,8 +113,65 @@ describe("isRetryableJudgeError", () => {
     expect(isRetryableJudgeError(new Error("The operation was aborted"))).toBe(true);
   });
 
+  it("retries a bare undici 'fetch failed' whose reason is only in error.cause", () => {
+    // undici throws TypeError: fetch failed with the real reason in `.cause`.
+    const err = new TypeError("fetch failed", {
+      cause: new Error("read ECONNRESET"),
+    });
+    expect(isRetryableJudgeError(err)).toBe(true);
+  });
+
+  it("retries when the cause carries only a code (no matching substring in message)", () => {
+    const err = new TypeError("fetch failed", {
+      cause: Object.assign(new Error("socket error"), { code: "ECONNRESET" }),
+    });
+    expect(isRetryableJudgeError(err)).toBe(true);
+  });
+
+  it("retries a 'fetch failed' even when the cause has no recognizable token", () => {
+    // The literal "fetch failed" match alone makes transport failures retryable.
+    const err = new TypeError("fetch failed", { cause: new Error("boom") });
+    expect(isRetryableJudgeError(err)).toBe(true);
+  });
+
   it("does not retry unrelated errors", () => {
     expect(isRetryableJudgeError(new Error("criteria not met"))).toBe(false);
+    expect(isRetryableJudgeError(new Error("criteria mismatch"))).toBe(false);
     expect(isRetryableJudgeError(null)).toBe(false);
+  });
+});
+
+describe("JudgeClient retries transport-level fetch failures", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("retries a 'fetch failed' rejection and then succeeds", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new TypeError("fetch failed", { cause: new Error("read ECONNRESET") })
+      )
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        text: async () => "",
+        json: async () => ({ passed: true, feedback: "recovered after retry" }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new JudgeClient("http://judge", { maxRetries: 2 });
+    const promise = client.evaluate(request);
+    // Advance past the backoff window (base 5s, max 30s incl. jitter) so the
+    // retry fires without waiting in real time.
+    await vi.advanceTimersByTimeAsync(30_000);
+    const result = await promise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.passed).toBe(true);
+    expect(result.feedback).toBe("recovered after retry");
   });
 });

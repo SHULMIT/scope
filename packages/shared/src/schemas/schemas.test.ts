@@ -19,7 +19,6 @@ import {
   RequestResponseSchema,
   RequestStatusSchema,
   RequestOutcomeSchema,
-  WorkerTypeSchema,
   LogEventSchema,
   TokenUsageSchema,
   ConversationTurnSchema,
@@ -234,19 +233,6 @@ describe("request schemas", () => {
     });
   });
 
-  describe("WorkerTypeSchema", () => {
-    it.each(["coder-acp-claude-code", "coder-acp-copilot", "coder-acp-copilot"])(
-      "accepts '%s'",
-      (w) => {
-        expect(WorkerTypeSchema.parse(w)).toBe(w);
-      },
-    );
-
-    it("rejects unknown worker", () => {
-      expect(() => WorkerTypeSchema.parse("unknown-worker")).toThrow();
-    });
-  });
-
   describe("CreateRequestInputSchema", () => {
     it("accepts minimal valid input", () => {
       const result = CreateRequestInputSchema.parse({ scenario: validScenario });
@@ -297,6 +283,7 @@ describe("request schemas", () => {
   describe("RequestResponseSchema", () => {
     const minimal = {
       _id: "abc123",
+      projectId: "proj-test",
       scenario: validScenario,
       workerType: "coder-acp-copilot",
       createdAt: NOW,
@@ -521,6 +508,7 @@ describe("criteria schemas", () => {
     it("accepts a valid response", () => {
       const result = CriteriaResponseSchema.parse({
         id: "my_criterion",
+        projectId: "proj-test",
         prompt: "Does it work?",
         createdAt: NOW,
       });
@@ -531,6 +519,7 @@ describe("criteria schemas", () => {
     it("optional fields can be omitted", () => {
       const result = CriteriaResponseSchema.parse({
         id: "x",
+        projectId: "proj-test",
         prompt: "p",
         createdAt: NOW,
       });
@@ -592,6 +581,7 @@ describe("prompt-feature schemas", () => {
     it("accepts valid response", () => {
       const result = PromptFeatureResponseSchema.parse({
         id: "feat1",
+        projectId: "proj-test",
         prompt: "p",
         createdAt: NOW,
       });
@@ -663,6 +653,7 @@ describe("report schemas", () => {
   describe("ReportResponseSchema", () => {
     const minimal = {
       _id: "rep1",
+      projectId: "proj-test",
       requestId: "req1",
       status: "pending",
       createdAt: NOW,
@@ -826,6 +817,7 @@ describe("report-template schemas", () => {
     it("accepts valid response", () => {
       const result = ReportTemplateResponseSchema.parse({
         _id: "mongo1",
+        projectId: "proj-test",
         id: "tmpl1",
         name: "Template",
         userPrompt: "Analyze",
@@ -877,6 +869,7 @@ describe("insight schemas", () => {
     it("accepts valid response", () => {
       const result = InsightResponseSchema.parse({
         _id: "i1",
+        projectId: "proj-test",
         title: "Insight",
         description: "desc",
         upvotes: 5,
@@ -953,6 +946,36 @@ describe("agent schemas", () => {
         createdAt: NOW,
       });
       expect(result.status).toBe("active");
+    });
+
+    it("accepts legacy response records without a queue name", () => {
+      const result = AgentVersionSchema.parse({
+        agentVersion: "1.0.0",
+        workerVersion: "2.0.0",
+        components: {},
+        gitCommit: "abc123",
+        buildTime: NOW,
+        imageTag: "v1",
+        status: "active",
+        createdAt: NOW,
+      });
+      expect(result.queueName).toBeUndefined();
+    });
+
+    it("still rejects registrations without a non-empty queue name", () => {
+      const registration = {
+        agentVersion: "1.0.0",
+        workerVersion: "2.0.0",
+        components: {},
+        gitCommit: "abc123",
+        buildTime: NOW,
+        imageTag: "v1",
+      };
+
+      expect(() => RegisterAgentVersionInputSchema.parse(registration)).toThrow();
+      expect(() =>
+        RegisterAgentVersionInputSchema.parse({ ...registration, queueName: " " }),
+      ).toThrow();
     });
 
     it("rejects invalid status", () => {
@@ -1139,6 +1162,8 @@ describe("mcp-server schemas", () => {
     it("accepts valid response", () => {
       const result = McpServerResponseSchema.parse({
         _id: "ms1",
+        slug: "ms1",
+        projectId: "proj-test",
         name: "Server",
         type: "http",
         url: "https://example.com",
@@ -1189,6 +1214,8 @@ describe("skill schemas", () => {
     it("accepts valid response", () => {
       const result = SkillResponseSchema.parse({
         _id: "s1",
+        slug: "github/test",
+        projectId: "proj-test",
         source: "github",
         skillName: "test",
         name: "Test",
@@ -1266,6 +1293,8 @@ describe("extension schemas", () => {
     it("accepts valid response", () => {
       const result = ExtensionResponseSchema.parse({
         _id: "ms-python.python",
+        slug: "ms-python.python",
+        projectId: "proj-test",
         publisher: "ms-python",
         name: "Python",
         origin: "marketplace",
@@ -1277,6 +1306,8 @@ describe("extension schemas", () => {
     it("accepts response with optional fields", () => {
       const result = ExtensionResponseSchema.parse({
         _id: "ms-python.python",
+        slug: "ms-python.python",
+        projectId: "proj-test",
         publisher: "ms-python",
         name: "Python",
         description: "Python lang",

@@ -6,8 +6,13 @@ import { TaskPromptStore } from "./task-prompt-store.js";
 import { computeTaskPromptId, computePromptId } from "./task-prompt-id.js";
 import type { TaskPromptDocument, PromptFeatureResult } from "../types/types.js";
 
+/** Project scope used across these unit tests. */
+const PID = "proj-test";
+
 // ── Mock Collection ──────────────────────────────────────────────────────────
 // Simulates a MongoDB collection in-memory for deterministic unit testing.
+// Matches the subset of filters the store issues: `_id`, `projectId`, `keyId`,
+// `type`, `deletedAt.$exists`, `text.$regex`, and the `$or` type clause.
 
 function createMockCollection() {
   const docs = new Map<string, TaskPromptDocument>();
@@ -20,18 +25,26 @@ function createMockCollection() {
     toArray() { return Promise.resolve(this._results); },
   });
 
+  const matches = (doc: TaskPromptDocument, filter: any): boolean => {
+    if (filter._id !== undefined && doc._id !== filter._id) return false;
+    if (filter.projectId !== undefined && doc.projectId !== filter.projectId) return false;
+    if (filter.keyId !== undefined && doc.keyId !== filter.keyId) return false;
+    if (filter.deletedAt?.$exists === false && doc.deletedAt) return false;
+    if (filter.deletedAt?.$exists === true && !doc.deletedAt) return false;
+    if (filter.text?.$regex) {
+      const regex = new RegExp(filter.text.$regex, filter.text.$options);
+      if (!regex.test(doc.text ?? "")) return false;
+    }
+    if (!matchesType(filter, doc)) return false;
+    return true;
+  };
+
   return {
     _docs: docs,
 
     findOne: vi.fn(async (filter: any) => {
-      if (filter._id) {
-        const doc = docs.get(filter._id);
-        if (!doc) return null;
-        // Check deletedAt filter
-        if (filter.deletedAt && filter.deletedAt.$exists === false && doc.deletedAt) {
-          return null;
-        }
-        return { ...doc };
+      for (const doc of docs.values()) {
+        if (matches(doc, filter)) return { ...doc };
       }
       return null;
     }),
@@ -42,19 +55,14 @@ function createMockCollection() {
     }),
 
     updateOne: vi.fn(async (filter: any, update: any) => {
-      const doc = docs.get(filter._id);
-      if (!doc) return { matchedCount: 0, modifiedCount: 0 };
-      // Check deletedAt filter if present
-      if (filter.deletedAt && filter.deletedAt.$exists === false && doc.deletedAt) {
-        return { matchedCount: 0, modifiedCount: 0 };
+      let target: TaskPromptDocument | undefined;
+      for (const doc of docs.values()) {
+        if (matches(doc, filter)) { target = doc; break; }
       }
-      if (update.$set) {
-        Object.assign(doc, update.$set);
-      }
+      if (!target) return { matchedCount: 0, modifiedCount: 0 };
+      if (update.$set) Object.assign(target, update.$set);
       if (update.$unset) {
-        for (const key of Object.keys(update.$unset)) {
-          delete (doc as any)[key];
-        }
+        for (const key of Object.keys(update.$unset)) delete (target as any)[key];
       }
       return { matchedCount: 1, modifiedCount: 1 };
     }),
@@ -62,13 +70,7 @@ function createMockCollection() {
     countDocuments: vi.fn(async (filter: any) => {
       let count = 0;
       for (const doc of docs.values()) {
-        if (filter.deletedAt?.$exists === false && doc.deletedAt) continue;
-        if (!matchesType(filter, doc)) continue;
-        if (filter.text?.$regex) {
-          const regex = new RegExp(filter.text.$regex, filter.text.$options);
-          if (!regex.test(doc.text ?? "")) continue;
-        }
-        count++;
+        if (matches(doc, filter)) count++;
       }
       return count;
     }),
@@ -76,13 +78,7 @@ function createMockCollection() {
     find: vi.fn((filter: any) => {
       const results: TaskPromptDocument[] = [];
       for (const doc of docs.values()) {
-        if (filter.deletedAt?.$exists === false && doc.deletedAt) continue;
-        if (!matchesType(filter, doc)) continue;
-        if (filter.text?.$regex) {
-          const regex = new RegExp(filter.text.$regex, filter.text.$options);
-          if (!regex.test(doc.text ?? "")) continue;
-        }
-        results.push({ ...doc });
+        if (matches(doc, filter)) results.push({ ...doc });
       }
       return mockCursor(results);
     }),
@@ -124,50 +120,61 @@ describe("TaskPromptStore", () => {
   // -- findOrCreate ---------------------------------------------------------
 
   describe("findOrCreate", () => {
-    it("creates a new task prompt", async () => {
-      const doc = await store.findOrCreate("Hello world");
-      const expectedId = computeTaskPromptId("Hello world");
-      expect(doc._id).toBe(expectedId);
+    it("creates a new task prompt with a fresh _id and content-hash keyId", async () => {
+      const doc = await store.findOrCreate(PID, "Hello world");
+      expect(doc.keyId).toBe(computeTaskPromptId("Hello world"));
+      expect(doc._id).not.toBe(doc.keyId); // fresh UUID, not the content hash
+      expect(doc.projectId).toBe(PID);
       expect(doc.text).toBe("Hello world");
       expect(doc.createdAt).toBeInstanceOf(Date);
       expect(doc.deletedAt).toBeUndefined();
     });
 
-    it("is idempotent — returns existing doc on second call", async () => {
-      const a = await store.findOrCreate("Hello world");
-      const b = await store.findOrCreate("Hello world");
+    it("is idempotent within a project — returns existing doc on second call", async () => {
+      const a = await store.findOrCreate(PID, "Hello world");
+      const b = await store.findOrCreate(PID, "Hello world");
       expect(a._id).toBe(b._id);
       expect(col.insertOne).toHaveBeenCalledTimes(1);
     });
 
+    it("creates distinct per-project copies for identical text (same keyId, distinct _id)", async () => {
+      const a = await store.findOrCreate("project-a", "shared prompt");
+      const b = await store.findOrCreate("project-b", "shared prompt");
+      expect(a.keyId).toBe(b.keyId); // same content hash
+      expect(a._id).not.toBe(b._id); // distinct documents
+      expect(a.projectId).toBe("project-a");
+      expect(b.projectId).toBe("project-b");
+      expect(col.insertOne).toHaveBeenCalledTimes(2);
+    });
+
     it("trims whitespace", async () => {
-      const a = await store.findOrCreate("  foo  ");
+      const a = await store.findOrCreate(PID, "  foo  ");
       expect(a.text).toBe("foo");
-      expect(a._id).toBe(computeTaskPromptId("foo"));
+      expect(a.keyId).toBe(computeTaskPromptId("foo"));
     });
 
     it("revives a soft-deleted document", async () => {
-      const doc = await store.findOrCreate("deleted prompt");
+      const doc = await store.findOrCreate(PID, "deleted prompt");
       await store.delete(doc._id);
 
-      const revived = await store.findOrCreate("deleted prompt");
+      const revived = await store.findOrCreate(PID, "deleted prompt");
       expect(revived._id).toBe(doc._id);
       expect(revived.deletedAt).toBeUndefined();
     });
 
-    it("namespaces non-task types into a distinct id", async () => {
-      const task = await store.findOrCreate("same text");
-      const agents = await store.findOrCreate("same text", "agents.md");
-      expect(agents._id).not.toBe(task._id);
-      expect(agents._id).toBe(computePromptId("agents.md", "same text"));
+    it("namespaces non-task types into a distinct keyId", async () => {
+      const task = await store.findOrCreate(PID, "same text");
+      const agents = await store.findOrCreate(PID, "same text", "agents.md");
+      expect(agents.keyId).not.toBe(task.keyId);
+      expect(agents.keyId).toBe(computePromptId("agents.md", "same text"));
       expect(agents.type).toBe("agents.md");
     });
 
-    it("keeps task ids backward-compatible (unchanged by type arg)", async () => {
-      const a = await store.findOrCreate("hello");
-      const b = await store.findOrCreate("hello", "select");
+    it("keeps task keyIds backward-compatible (unchanged by type arg)", async () => {
+      const a = await store.findOrCreate(PID, "hello");
+      const b = await store.findOrCreate(PID, "hello", "select");
       expect(a._id).toBe(b._id);
-      expect(a._id).toBe(computeTaskPromptId("hello"));
+      expect(a.keyId).toBe(computeTaskPromptId("hello"));
     });
   });
 
@@ -193,7 +200,7 @@ describe("TaskPromptStore", () => {
     it("stores small bodies inline and never touches blob", async () => {
       const blob = createMockBlob();
       const s = new TaskPromptStore(col as any, blob as any, 1024);
-      const doc = await s.findOrCreate("tiny");
+      const doc = await s.findOrCreate(PID, "tiny");
       expect(doc.text).toBe("tiny");
       expect(doc.contentBlobUrl).toBeUndefined();
       expect(blob.uploadText).not.toHaveBeenCalled();
@@ -203,7 +210,7 @@ describe("TaskPromptStore", () => {
       const blob = createMockBlob();
       const s = new TaskPromptStore(col as any, blob as any, 16);
       const big = "x".repeat(64);
-      const doc = await s.findOrCreate(big, "agents.md");
+      const doc = await s.findOrCreate(PID, big, "agents.md");
       expect(doc.text).toBeUndefined();
       expect(doc.contentBlobUrl).toContain(`prompts/${doc._id}.txt`);
       expect(blob.uploadText).toHaveBeenCalledTimes(1);
@@ -213,15 +220,15 @@ describe("TaskPromptStore", () => {
       const blob = createMockBlob();
       const s = new TaskPromptStore(col as any, blob as any, 16);
       const big = "y".repeat(64);
-      await s.findOrCreate(big, "agents.md");
-      await s.findOrCreate(big, "agents.md");
+      await s.findOrCreate(PID, big, "agents.md");
+      await s.findOrCreate(PID, big, "agents.md");
       expect(blob.uploadText).toHaveBeenCalledTimes(1);
     });
 
     it("resolvePromptText returns inline text without blob access", async () => {
       const blob = createMockBlob();
       const s = new TaskPromptStore(col as any, blob as any, 1024);
-      const doc = await s.findOrCreate("inline body");
+      const doc = await s.findOrCreate(PID, "inline body");
       expect(await s.resolvePromptText(doc)).toBe("inline body");
       expect(blob.downloadBlobToBuffer).not.toHaveBeenCalled();
     });
@@ -230,7 +237,7 @@ describe("TaskPromptStore", () => {
       const blob = createMockBlob();
       const s = new TaskPromptStore(col as any, blob as any, 16);
       const big = "z".repeat(64);
-      const doc = await s.findOrCreate(big, "agents.md");
+      const doc = await s.findOrCreate(PID, big, "agents.md");
       expect(await s.resolvePromptText(doc)).toBe(big);
       expect(blob.downloadBlobToBuffer).toHaveBeenCalledTimes(1);
     });
@@ -239,12 +246,12 @@ describe("TaskPromptStore", () => {
       const blob = createMockBlob();
       const s = new TaskPromptStore(col as any, blob as any, 16);
       const huge = "a".repeat(256 * 1024 + 1);
-      await expect(s.findOrCreate(huge)).rejects.toThrow(/maximum/);
+      await expect(s.findOrCreate(PID, huge)).rejects.toThrow(/maximum/);
     });
 
     it("throws when an over-threshold body has no blob storage configured", async () => {
       const s = new TaskPromptStore(col as any, undefined, 16);
-      await expect(s.findOrCreate("b".repeat(64))).rejects.toThrow(/BlobStorage/);
+      await expect(s.findOrCreate(PID, "b".repeat(64))).rejects.toThrow(/BlobStorage/);
     });
   });
 
@@ -257,14 +264,14 @@ describe("TaskPromptStore", () => {
     });
 
     it("returns the document by ID", async () => {
-      const created = await store.findOrCreate("test prompt");
+      const created = await store.findOrCreate(PID, "test prompt");
       const result = await store.get(created._id);
       expect(result).not.toBeNull();
       expect(result!.text).toBe("test prompt");
     });
 
     it("returns null for soft-deleted documents", async () => {
-      const created = await store.findOrCreate("to be deleted");
+      const created = await store.findOrCreate(PID, "to be deleted");
       await store.delete(created._id);
       const result = await store.get(created._id);
       expect(result).toBeNull();
@@ -274,15 +281,21 @@ describe("TaskPromptStore", () => {
   // -- getByText ------------------------------------------------------------
 
   describe("getByText", () => {
-    it("finds a document by text content", async () => {
-      await store.findOrCreate("find me");
-      const result = await store.getByText("find me");
+    it("finds a document by text content within a project", async () => {
+      await store.findOrCreate(PID, "find me");
+      const result = await store.getByText(PID, "find me");
       expect(result).not.toBeNull();
       expect(result!.text).toBe("find me");
     });
 
     it("returns null for unknown text", async () => {
-      const result = await store.getByText("unknown text");
+      const result = await store.getByText(PID, "unknown text");
+      expect(result).toBeNull();
+    });
+
+    it("does not find another project's prompt", async () => {
+      await store.findOrCreate("project-a", "scoped text");
+      const result = await store.getByText("project-b", "scoped text");
       expect(result).toBeNull();
     });
   });
@@ -291,7 +304,7 @@ describe("TaskPromptStore", () => {
 
   describe("delete", () => {
     it("soft-deletes a document", async () => {
-      const doc = await store.findOrCreate("deletion target");
+      const doc = await store.findOrCreate(PID, "deletion target");
       await store.delete(doc._id);
       const result = await store.get(doc._id);
       expect(result).toBeNull();
@@ -314,16 +327,24 @@ describe("TaskPromptStore", () => {
     });
 
     it("returns all active documents", async () => {
-      await store.findOrCreate("first");
-      await store.findOrCreate("second");
+      await store.findOrCreate(PID, "first");
+      await store.findOrCreate(PID, "second");
       const { items, total } = await store.getAll();
       expect(total).toBe(2);
       expect(items).toHaveLength(2);
     });
 
+    it("scopes to a single project when projectId is given", async () => {
+      await store.findOrCreate("project-a", "a-only");
+      await store.findOrCreate("project-b", "b-only");
+      const { items, total } = await store.getAll({ projectId: "project-a" });
+      expect(total).toBe(1);
+      expect(items[0].text).toBe("a-only");
+    });
+
     it("excludes soft-deleted documents", async () => {
-      const doc = await store.findOrCreate("will delete");
-      await store.findOrCreate("will keep");
+      const doc = await store.findOrCreate(PID, "will delete");
+      await store.findOrCreate(PID, "will keep");
       await store.delete(doc._id);
       const { items, total } = await store.getAll();
       expect(total).toBe(1);
@@ -331,24 +352,24 @@ describe("TaskPromptStore", () => {
     });
 
     it("supports search filter", async () => {
-      await store.findOrCreate("Azure deployment");
-      await store.findOrCreate("React frontend");
+      await store.findOrCreate(PID, "Azure deployment");
+      await store.findOrCreate(PID, "React frontend");
       const { items, total } = await store.getAll({ search: "azure" });
       expect(total).toBe(1);
       expect(items[0].text).toBe("Azure deployment");
     });
 
     it("defaults to all prompt types (including agents.md and legacy untyped docs)", async () => {
-      await store.findOrCreate("a task prompt");
-      await store.findOrCreate("an agents file", "agents.md");
+      await store.findOrCreate(PID, "a task prompt");
+      await store.findOrCreate(PID, "an agents file", "agents.md");
       const { items, total } = await store.getAll();
       expect(total).toBe(2);
       expect(items.map((i) => i.text).sort()).toEqual(["a task prompt", "an agents file"]);
     });
 
     it("filters by agents.md type", async () => {
-      await store.findOrCreate("a task prompt");
-      await store.findOrCreate("an agents file", "agents.md");
+      await store.findOrCreate(PID, "a task prompt");
+      await store.findOrCreate(PID, "an agents file", "agents.md");
       const { items, total } = await store.getAll({ type: "agents.md" });
       expect(total).toBe(1);
       expect(items[0].text).toBe("an agents file");
@@ -359,7 +380,7 @@ describe("TaskPromptStore", () => {
 
   describe("attachFeatures", () => {
     it("attaches features to a task prompt", async () => {
-      const doc = await store.findOrCreate("feature target");
+      const doc = await store.findOrCreate(PID, "feature target");
       const features: PromptFeatureResult[] = [
         { featureId: "has_node", detected: true, evaluated: true },
         { featureId: "has_react", detected: false, evaluated: true },
@@ -377,7 +398,7 @@ describe("TaskPromptStore", () => {
     });
 
     it("overwrites previous features", async () => {
-      const doc = await store.findOrCreate("overwrite target");
+      const doc = await store.findOrCreate(PID, "overwrite target");
       const v1: PromptFeatureResult[] = [{ featureId: "a", detected: true, evaluated: true }];
       const v2: PromptFeatureResult[] = [{ featureId: "b", detected: false, evaluated: true }];
 

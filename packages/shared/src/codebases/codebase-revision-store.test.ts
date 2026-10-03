@@ -133,7 +133,7 @@ async function makeStores() {
     revisionCollection as unknown as Collection<CodebaseRevisionDocument>,
     codebaseStore
   );
-  const codebase = await codebaseStore.create({ name: "Pamela Fox Site", sourceType: "archive" });
+  const codebase = await codebaseStore.create({ projectId: "proj-test", name: "Pamela Fox Site", sourceType: "archive" });
   return { codebaseStore, revisionStore, codebase, revisions: revisionCollection.docs };
 }
 

@@ -3,6 +3,7 @@
 
 import type { DequeuedMessageItem } from "@azure/storage-queue";
 import { BaseQueueProcessor, BlobStorage, Retry, type BaseQueueProcessorConfig, type LogEvent, type VisibilityHeartbeat } from "shared";
+import { trackMetric, trackEvent } from "telemetry";
 import { POST_PROCESSOR_VERSION } from "./version.js";
 import type { PostProcessHandler, PostProcessorMessage, HandlerContext } from "./types.js";
 
@@ -30,6 +31,7 @@ export class PostProcessor extends BaseQueueProcessor<RequestDocument> {
   private handlers = new Map<string, PostProcessHandler>();
   private blobStorage: BlobStorage;
   private apiBaseUrl?: string;
+  private static coldStartTracked = false;
 
   constructor(config: PostProcessorConfig) {
     super(config, "post-processor");
@@ -52,7 +54,13 @@ export class PostProcessor extends BaseQueueProcessor<RequestDocument> {
     log: (level: LogEvent["level"], msg: string, data?: Record<string, unknown>) => Promise<void>,
     payload?: Record<string, unknown>,
   ): Promise<void> {
+    const processStart = Date.now();
     const msg = payload as unknown as PostProcessorMessage;
+
+    if (!PostProcessor.coldStartTracked) {
+      PostProcessor.coldStartTracked = true;
+      trackMetric({ name: "post_processor.cold_start_ms", value: process.uptime() * 1000, properties: { service: "post-processor" } });
+    }
 
     if (!msg?.type) {
       await log("warn", "Message missing 'type' field, discarding");
@@ -77,6 +85,7 @@ export class PostProcessor extends BaseQueueProcessor<RequestDocument> {
 
     try {
       await log("info", `Running handler: ${msg.type}`);
+      trackEvent({ name: "post_processor.processing_started", properties: { handlerType: msg.type, requestId: doc._id } });
 
       const ctx: HandlerContext = {
         blobStorage: this.blobStorage,
@@ -98,6 +107,8 @@ export class PostProcessor extends BaseQueueProcessor<RequestDocument> {
       );
 
       await log("info", `Post-processing complete (v${POST_PROCESSOR_VERSION})`);
+      trackMetric({ name: "post_processor.processing_duration_ms", value: Date.now() - processStart, properties: { service: "post-processor", handlerType: msg.type } });
+      trackEvent({ name: "post_processor.processing_completed", properties: { handlerType: msg.type, requestId: doc._id } });
 
       // Trigger report generation now that enrichment is done (best-effort)
       try {

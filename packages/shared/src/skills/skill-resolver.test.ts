@@ -271,6 +271,7 @@ describe("SkillResolver.resolve (lenient validation)", () => {
 
     const store = makeStore();
     const revision = await resolver.resolve(
+      "proj-test",
       "owner/repo",
       "my-skill",
       store as never,

@@ -38,8 +38,9 @@ export async function insertHistoricalRun(
   opts: RunsRepoOptions,
   requestId: string,
   run: RunState,
+  projectId: string,
 ): Promise<void> {
-  const doc: RunHistoryDocument = { ...run, requestId };
+  const doc: RunHistoryDocument = { ...run, requestId, projectId };
   await opts.runsCollection.insertOne(doc as any);
 }
 

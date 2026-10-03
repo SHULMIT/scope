@@ -26,10 +26,15 @@ export type SkillOrigin = "skills-sh" | "manual";
  * skill in Scope's internal library. Regardless of origin (manual or skills-sh),
  * the skill content is always resolved from the GitHub repository specified by `source`.
  *
- * The `_id` slug is `{source}/{skillName}` (e.g. "vercel-labs/agent-skills/vercel-react-best-practices").
+ * The human slug is `{source}/{skillName}` (e.g. "vercel-labs/agent-skills/vercel-react-best-practices"),
+ * exposed as the public `id`. It is unique **per project**, not globally — the same slug may exist in
+ * multiple projects. New rows use a random UUID `_id` and carry the slug in `slug`; legacy rows
+ * (pre-migration 026) still have `_id === slug`, so lookups accept either.
  */
 export interface SkillDocument {
-  _id: string;                    // Slug: "{source}/{skillName}"
+  _id: string;                    // Random UUID for new rows; legacy rows: slug "{source}/{skillName}"
+  slug: string;                   // Human slug "{source}/{skillName}" — unique per project, exposed as public `id`
+  projectId: string;              // FK → ProjectDocument._id (immutable scope)
   source: string;                 // GitHub repo (e.g. "vercel-labs/agent-skills")
   skillName: string;              // Skill name within the repo (e.g. "vercel-react-best-practices")
   name: string;                   // Human-readable display name (from SKILL.md or user input)
@@ -50,6 +55,7 @@ export interface SkillDocument {
  */
 export interface SkillRevisionDocument {
   _id: string;                    // UUIDv5 computed from `ref`
+  projectId: string;              // FK → ProjectDocument._id (immutable scope; per-project copy)
   ref: string;                    // Human-readable ref: "{source}/{skillName}@{commitHash}"
   source: string;                 // GitHub repo (e.g. "vercel-labs/agent-skills")
   skillName: string;              // Skill name (matches parent directory name per spec)

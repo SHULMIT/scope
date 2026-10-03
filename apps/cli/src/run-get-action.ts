@@ -5,7 +5,7 @@
  * Action handler for `run get` subcommand — extracted for testability.
  */
 import { colorLevel, dimTimestamp, errorText, successText, label, value, banner, warnBanner, criterionIcon } from "./utils/style.js";
-import { GATE_METADATA, GATE_ORDER, type ConversationTurn, type GateId, type GateRunSummary, type RequestDocument } from "shared";
+import { GATE_METADATA, GATE_ORDER, type ConversationTurn, type GateId, type GateRunSummary, type RequestDocument } from "shared/types";
 import { formatData, isMachineReadable } from "./utils/formatters.js";
 import type { OutputFormat, DisplayField } from "./utils/types.js";
 import { apiFetch } from "./utils/api-client.js";
@@ -173,11 +173,6 @@ export async function runGetAction(options: RunGetOptions): Promise<void> {
   // Error
   if (rs?.error) {
     console.log(`${label('Error:')}          ${errorText(rs.error)}`);
-  }
-
-  // Prompt feature extraction
-  if (run.promptFeatureExtractionId) {
-    console.log(`${label('Prompt Features:')} ${value(run.promptFeatureExtractionId)}`);
   }
 
   // Soft-deleted

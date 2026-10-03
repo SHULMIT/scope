@@ -1,0 +1,13 @@
+allowBuilds:
+  esbuild: true
+  sharp: true
+
+# Force patched versions of transitive dependencies flagged by
+# Dependency Review / pnpm audit. These are all indirect deps pulled in
+# via astro / starlight / starlight-openapi; overriding here bumps every
+# nested copy to a non-vulnerable release without waiting for upstream.
+overrides:
+  form-data: ">=4.0.6"
+  vite: ">=7.3.5 <8"
+  js-yaml: ">=4.2.0 <5"
+  esbuild: ">=0.28.1"

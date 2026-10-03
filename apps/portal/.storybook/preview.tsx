@@ -8,6 +8,9 @@ import { initialize, mswLoader } from "msw-storybook-addon";
 import { mswHandlers } from "./msw-handlers";
 import { FeatureFlagProvider } from "../src/contexts/FeatureFlagContext";
 import { ThemeProvider } from "../src/contexts/ThemeContext";
+import { AuthContext } from "../src/contexts/AuthContext";
+import { signedInAuth } from "../src/contexts/authFixtures";
+import { ProjectProvider } from "../src/contexts/ProjectContext";
 import "../src/index.css";
 
 initialize({ onUnhandledRequest: "bypass" });
@@ -23,13 +26,17 @@ const preview: Preview = {
       });
       return (
         <QueryClientProvider client={queryClient}>
-          <FeatureFlagProvider>
-            <ThemeProvider>
-              <MemoryRouter>
-                <Story />
-              </MemoryRouter>
-            </ThemeProvider>
-          </FeatureFlagProvider>
+          <AuthContext.Provider value={signedInAuth}>
+            <FeatureFlagProvider>
+              <ThemeProvider>
+                <ProjectProvider>
+                  <MemoryRouter>
+                    <Story />
+                  </MemoryRouter>
+                </ProjectProvider>
+              </ThemeProvider>
+            </FeatureFlagProvider>
+          </AuthContext.Provider>
         </QueryClientProvider>
       );
     },

@@ -1,0 +1,180 @@
+---
+title: Defining evaluation criteria
+description: Describe what makes a benchmark run successful with criteria graphs (DAGs).
+---
+
+**Evaluation criteria** describe what makes a run successful. The
+[judge](/introduction/concepts/#judge) evaluates the agent's output
+against each criterion and produces the run's report.
+
+Criteria are first-class, reusable entities: each criterion has a
+stable ID and a `prompt` describing what to look for, and a
+[request](/guides/submitting-requests-portal/) references criteria by
+ID.
+
+## Gates and reusable criteria
+
+**Gates** are the stages of a run. **Criteria** are the reusable checks
+that define success within each stage. For example, a run can use the
+**Requirements**, **Build**, and **Test** gates, in that order.
+
+Select criteria from your library for each gate. A criterion can declare
+which gates it is compatible with using `gates`; the criteria within a
+gate still form a dependency graph. Gates are not themselves criteria.
+
+Each gate has its own iteration budget. If it does not pass before
+exhausting that budget, the pipeline stops and later gates are recorded
+as skipped. Separately, a failed criterion causes its dependent criteria
+to be skipped inside the gate.
+
+The [interactive example](/#see-it-work) illustrates both levels: the
+ordered gates and an expandable criteria graph. Its results, token
+counts, and durations are fictional examples, not benchmark measurements.
+
+## The criteria graph
+
+Every criterion lives in a **directed acyclic graph (DAG)**.
+Dependencies between criteria are declared with `dependsOn`. A
+criterion is evaluated only when all of its parents pass; if a parent
+fails, its descendants are skipped and reported as such.
+
+A criterion with no `dependsOn` is a **root** — it has no
+prerequisites and is always evaluated. A graph that is *all roots* is
+still a DAG; it just has no edges. There is no separate "flat
+checklist" mode.
+
+## Writing a single criterion
+
+A criterion is a single, observable statement. The judge reads the
+agent's output (files, logs, command output) and decides whether the
+statement holds.
+
+Good criteria are:
+
+- **Observable** — a human reading the same output would reach the
+  same conclusion.
+- **Atomic** — one thing per criterion. Split compound statements.
+- **Outcome-focused** — describe the *result*, not the *path*. "The
+  server returns JSON on `/health`" is better than "The agent uses
+  Express's built-in JSON middleware."
+
+Examples:
+
+- ✅ *Has a `package.json` with `express` as a dependency.*
+- ✅ *`GET /health` returns HTTP 200 with a JSON body.*
+- ✅ *No tests fail when running `npm test`.*
+- ❌ *Code is high-quality.* (not observable consistently)
+- ❌ *Has Express routes and a database connection.* (not atomic)
+
+## Building the graph
+
+Use `dependsOn` when:
+
+- A later check is meaningless without an earlier one. *(Don't bother
+  checking `GET /` returns hello-world if there's no Express server.)*
+- You want to express **alternative paths**. *(Pass if SQLite is set
+  up correctly OR Postgres is set up correctly.)*
+- A task has natural **stages** and you want a clear report of how far
+  the agent got.
+
+Example:
+
+```yaml
+- id: has_package_json
+  prompt: Has a package.json with express as a dependency
+- id: has_express_server
+  prompt: Has a main entry file that creates an Express server
+  dependsOn: [has_package_json]
+- id: has_root_route
+  prompt: GET / returns a hello world response
+  dependsOn: [has_express_server]
+- id: configurable_port
+  prompt: The server listens on a configurable port
+  dependsOn: [has_express_server]
+```
+
+The judge evaluates `has_package_json` first, then
+`has_express_server` only if it passed, then `has_root_route` and
+`configurable_port` in parallel only if `has_express_server` passed.
+
+If you don't need ordering or conditional evaluation, just don't set
+`dependsOn` — every criterion becomes a root and they're all evaluated
+independently. Cycles in `dependsOn` are rejected.
+
+For the full schema (field names, validation rules), see the
+[Criteria schema reference](/reference/criteria-schema/).
+
+## Auto-generating evaluation prompts
+
+When you create a criterion, Scope can generate the underlying
+evaluation prompt for you using GitHub Models. The prompt describes
+how the judge should look for evidence in the run's output. You can
+edit the generated prompt before saving.
+
+This is exposed in the Portal's criterion editor as **Generate prompt**
+and through the API as a related endpoint. See the Swagger reference
+for the exact route.
+
+## Creating criteria
+
+### Portal
+
+1. Open **Criteria** in the navigation.
+2. Click **New criterion**, give it an ID and a prompt.
+3. To make it depend on others, set `dependsOn` to the IDs of its
+   parents.
+4. Save.
+
+### REST API
+
+Criteria are created one at a time:
+
+```http
+POST /api/v1/criteria
+Content-Type: application/json
+
+{
+  "id": "has_package_json",
+  "prompt": "Has a package.json with express as a dependency"
+}
+```
+
+With a dependency:
+
+```http
+POST /api/v1/criteria
+Content-Type: application/json
+
+{
+  "id": "has_express_server",
+  "prompt": "Has a main entry file that creates an Express server",
+  "dependsOn": ["has_package_json"]
+}
+```
+
+A request references criteria by ID in `scenario.criteria` — see
+[Submitting requests (REST API)](/guides/submitting-requests-api/).
+
+## Editing criteria
+
+Criteria are mutable. Editing replaces the stored definition. Past
+run reports are computed from the criteria as they were *at
+submission time*, so edits don't change historical results.
+
+## Tips
+
+- **Add edges only when they buy you something.** A graph with no
+  `dependsOn` edges is fine — don't invent dependencies just to make
+  the graph "look richer."
+- **Keep IDs stable.** Criterion IDs appear in reports and analyses;
+  rename sparingly.
+- **Don't bake the answer in.** Criteria should describe the outcome,
+  not the implementation choice. Otherwise you're benchmarking the
+  agent's ability to *guess your style*, not solve the task.
+- **One responsibility per criterion.** Compound criteria make
+  pass/fail rationale ambiguous.
+
+## See also
+
+- [Criteria schema reference](/reference/criteria-schema/)
+- [Submitting requests (Portal)](/guides/submitting-requests-portal/)

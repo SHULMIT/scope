@@ -28,6 +28,8 @@ function makeTaskPrompt(
 ): TaskPromptDocument {
   return {
     _id: 'tp-uuid-1',
+    projectId: 'proj-test',
+    keyId: 'tp-key-1',
     text: 'Build an Express API',
     features: [
       { featureId: 'asks_for_api', detected: true, evaluated: true },

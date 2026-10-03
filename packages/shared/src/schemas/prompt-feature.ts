@@ -29,6 +29,7 @@ export const PromptFeatureResponseSchema = z
     createdAt: z.coerce.date(),
     updatedAt: z.coerce.date().optional(),
     deletedAt: z.coerce.date().optional(),
+    projectId: z.string(),
   })
   .openapi("PromptFeatureResponse");
 
@@ -47,15 +48,3 @@ export const SuggestedPromptFeatureSchema = z
     prompt: z.string(),
   })
   .openapi("SuggestedPromptFeature");
-
-export const PromptFeatureExtractionResponseSchema = z
-  .object({
-    _id: z.string().optional(),
-    taskText: z.string(),
-    taskTextHash: z.string(),
-    promptFeatureResults: z.array(PromptFeatureResultSchema),
-    suggestedFeatures: z.array(SuggestedPromptFeatureSchema).optional(),
-    extractedAt: z.coerce.date(),
-    model: z.string().optional(),
-  })
-  .openapi("PromptFeatureExtractionResponse");
