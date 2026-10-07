@@ -1,3 +1,11 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# Windows side of the Scope WSL setup: updates WSL, installs an Ubuntu
+# distribution and Docker Desktop (WSL 2 backend). Run it from an elevated
+# PowerShell; scripts/setup-linux-prereqs.sh finishes the setup inside Ubuntu.
+# Guide: docs/tips/03-windows-wsl-dev-setup.md
+
 #Requires -Version 5.1
 
 [CmdletBinding()]
@@ -11,7 +19,6 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $dockerPackageId = 'Docker.DockerDesktop'
-$scopeSetupUrl = 'https://gist.githubusercontent.com/cmaneu/03e857b16ee36788962a9355d738970b/raw/eb4b3f29e821f15fcf53e9ba8589cae0ded99e9a/scope-setup.sh'
 
 function Invoke-NativeCommand {
     param(
@@ -158,8 +165,6 @@ else {
     Write-Warning 'Docker Desktop installation was skipped. Install it before running Scope.'
 }
 
-$scopeSetupCommand = "curl -fsSL '$scopeSetupUrl' -o /tmp/scope-setup.sh && bash /tmp/scope-setup.sh --skip-docker"
-
 Write-Host @"
 
 Windows-side setup is complete.
@@ -167,9 +172,15 @@ Windows-side setup is complete.
 Next steps:
 1. Launch $Distribution from the Start menu and finish its first-run prompt to create your Linux user.
 2. Launch Docker Desktop and wait for it to finish initializing its WSL 2 engine for your Windows user.
-3. Open $Distribution again and run:
+   In Settings > Resources > WSL integration, make sure $Distribution is enabled.
+3. Open $Distribution again, clone Scope (or your fork) into the Linux filesystem and run its setup script:
 
-$scopeSetupCommand
+   sudo apt-get update && sudo apt-get install -y git
+   mkdir -p ~/src && cd ~/src
+   git clone https://github.com/microsoft/scope.git
+   cd scope
+   bash scripts/setup-linux-prereqs.sh --skip-docker
 
 The --skip-docker option keeps the Linux setup script from installing a second Docker Engine inside WSL.
+Guide: https://github.com/microsoft/scope/blob/main/docs/tips/03-windows-wsl-dev-setup.md
 "@ -ForegroundColor Green

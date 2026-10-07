@@ -75,6 +75,9 @@ confirm() {
 }
 
 # --- Privilege / distro detection -------------------------------------------
+# $USER is unset in containers (e.g. a devcontainer running as root) and
+# `set -u` would abort on it, so resolve the account name directly.
+CURRENT_USER="$(id -un)"
 SUDO=""
 if [ "$(id -u)" -ne 0 ]; then
   if have sudo; then SUDO="sudo"; else
@@ -182,7 +185,7 @@ if have node && [ "$(node_major)" = "$REQUIRED_NODE_MAJOR" ]; then
 elif have node; then
   warn "node $(node -v) found, but Scope and CI use Node ${REQUIRED_NODE_MAJOR}.x"
   if [ "$CHECK_ONLY" = 0 ] && [ "$PKG" = apt ] && confirm "Install Node ${REQUIRED_NODE_MAJOR} via NodeSource?"; then
-    curl -fsSL "https://deb.nodesource.com/setup_${REQUIRED_NODE_MAJOR}.x" | $SUDO -E bash - \
+    curl -fsSL "https://deb.nodesource.com/setup_${REQUIRED_NODE_MAJOR}.x" | ${SUDO:+$SUDO -E} bash - \
       && $SUDO apt-get install -y nodejs \
       && ok "node $(node -v)"
   else
@@ -191,7 +194,7 @@ elif have node; then
 else
   bad "node"
   if [ "$CHECK_ONLY" = 0 ] && [ "$PKG" = apt ]; then
-    curl -fsSL "https://deb.nodesource.com/setup_${REQUIRED_NODE_MAJOR}.x" | $SUDO -E bash - \
+    curl -fsSL "https://deb.nodesource.com/setup_${REQUIRED_NODE_MAJOR}.x" | ${SUDO:+$SUDO -E} bash - \
       && $SUDO apt-get install -y nodejs \
       && ok "node $(node -v)" || warn "install Node ${REQUIRED_NODE_MAJOR} manually"
   else
@@ -273,10 +276,10 @@ else
       else
         info "Try:  $SUDO systemctl enable --now docker"
       fi
-      if ! id -nG "$USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
-        warn "$USER is not in the 'docker' group"
-        if [ "$CHECK_ONLY" = 0 ] && confirm "Add $USER to the docker group?"; then
-          $SUDO groupadd -f docker && $SUDO usermod -aG docker "$USER" \
+      if ! id -nG "$CURRENT_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+        warn "$CURRENT_USER is not in the 'docker' group"
+        if [ "$CHECK_ONLY" = 0 ] && confirm "Add $CURRENT_USER to the docker group?"; then
+          $SUDO groupadd -f docker && $SUDO usermod -aG docker "$CURRENT_USER" \
             && warn "group added — log out and back in (or run: newgrp docker)"
         fi
       fi
@@ -288,6 +291,7 @@ else
     DGID="$(getent group docker | cut -d: -f3)"
     ok "docker group GID = $DGID"
     info "Linux tip: export DOCKER_GID=$DGID so the ACP workers can use /var/run/docker.sock"
+    info "(Docker Engine only: with Docker Desktop, including WSL, leave DOCKER_GID unset)"
   fi
 fi
 
@@ -390,7 +394,9 @@ Next steps
 
   gh auth login
   export GITHUB_TOKEN="$(gh auth token)"
-  export DOCKER_GID="$(getent group docker | cut -d: -f3)"   # Linux socket access
+  # Docker Engine on Linux only. Leave DOCKER_GID unset with Docker Desktop
+  # (including WSL): its socket is GID 0 in containers, the Compose default.
+  export DOCKER_GID="$(getent group docker | cut -d: -f3)"
 
   pnpm docker:dev:copilot     # full hot-reload stack (Copilot worker + Portal)
   pnpm open:portal            # opens http://localhost:5100 by default
