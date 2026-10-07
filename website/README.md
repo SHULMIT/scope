@@ -7,7 +7,16 @@ End-user documentation site for **Scope**, built with
 and published to GitHub Pages.
 
 The product and this documentation site live in
-[microsoft/scope](https://github.com/microsoft/scope).
+[microsoft/scope](https://github.com/microsoft/scope). Users and contributors
+should start at the [official documentation website](https://microsoft.github.io/scope/).
+
+The root README is a short introduction and entry point to the website.
+Keep detailed setup, usage, and contribution guidance in
+[src/content/docs/](src/content/docs/) and register new pages in the sidebar.
+Local setup lives in
+[getting-started/local-development.md](src/content/docs/getting-started/local-development.md);
+development, contribution, and support guidance live under
+[resources/](src/content/docs/resources/).
 
 ## Project structure
 
@@ -16,7 +25,7 @@ The product and this documentation site live in
 ├── public/                          # static assets
 ├── src/
 │   ├── assets/
-│   ├── components/                  # Astro landing, interactive example, header, page title
+│   ├── components/                  # Astro landing, interactive example, header, page title, site footer
 │   │   └── community/               # article/talk lists + landing teaser
 │   ├── content/
 │   │   ├── docs/                    # all user-facing pages (.md / .mdx)
@@ -45,6 +54,10 @@ Sidebar order is defined in `astro.config.mjs`, not by directory order.
 
 ## Commands
 
+Run these commands from `website/`. The site has its own
+[package.json](package.json) and [pnpm-lock.yaml](pnpm-lock.yaml), separate
+from the root pnpm workspace.
+
 | Command                | Action                                                     |
 | :--------------------- | :--------------------------------------------------------- |
 | `pnpm install`         | Install dependencies                                       |
@@ -52,7 +65,7 @@ Sidebar order is defined in `astro.config.mjs`, not by directory order.
 | `pnpm build`           | Build the production site to `./dist/`                     |
 | `pnpm preview`         | Preview the production build locally                       |
 | `pnpm test`            | Test site plugins with Node's built-in test runner          |
-| `pnpm refresh:openapi` | Generate the OpenAPI snapshot from `scope-core` |
+| `pnpm refresh:openapi` | Generate the OpenAPI snapshot from this monorepo's API |
 
 ## Authoring docs
 
@@ -76,17 +89,19 @@ Sidebar order is defined in `astro.config.mjs`, not by directory order.
   [`starlight-openapi`](https://starlight-openapi.vercel.app/) — do
   not edit them by hand.
 - Run `pnpm refresh:openapi` from this directory after changing API
-  routes or schemas. It runs `apps/api`'s generator from the same
-  `scope-core` checkout, so root workspace dependencies must be
-  installed first.
+  routes or schemas. It runs `pnpm --filter api generate:openapi` from the
+  repository root, using [apps/api/src/openapi/generate.ts](../apps/api/src/openapi/generate.ts)
+  in this same `microsoft/scope` checkout. Install the root workspace
+  dependencies first; the generator updates
+  [src/openapi/scope-openapi.json](src/openapi/scope-openapi.json).
 
 - To list a new article or talk on the Community page, add one YAML
   file under `src/content/articles/` or `src/content/talks/`. See
   "Articles & talks" in [AGENTS.md](AGENTS.md) for the fields.
 
 See [AGENTS.md](AGENTS.md) for conventions, the source-of-truth
-policy (everything factual must be grounded in scope-core), and
-where to look in scope-core for any given topic.
+policy (everything factual must be grounded in this checkout's source),
+and where to look in the monorepo for any given topic.
 
 ## Deployment
 
@@ -148,25 +163,51 @@ table of contents, code examples, and previous/next navigation.
 
 The supplied Scope showreel plays in a framed 16:9 player below the
 hero calls to action, so the headline stays clean and the footage is
-shown without an overlay. The local [video](public/scope-showreel.mp4)
-is re-encoded as H.264 at half the original speed (30 seconds instead
-of 15), with the audio track removed and metadata moved to the front
-for web playback. It loops, is always muted, and plays inline on
-mobile. A visually hidden caption describes the scenes it shows.
+shown without an overlay. It comes in two cuts styled with the landing
+tokens: a [dark video](public/scope-showreel-dark.mp4) and a
+[light video](public/scope-showreel-light.mp4). Both show the same
+scenes and are re-encoded as H.264 at half the original speed (30
+seconds instead of 15), with the audio track removed and metadata moved
+to the front for web playback. The player loops, is always muted, and
+plays inline on mobile. A visually hidden caption describes the scenes.
 
-[showreel.ts](src/scripts/showreel.ts) starts playback when at least a
-quarter of the player is visible. A keyboard-accessible button pauses
-or resumes it. Scrolling it out of view or hiding the tab pauses
-playback; an explicit user pause persists when returning. The button
-overlays the bottom corner of the video, and moves below it on narrow
-screens so it does not cover the footage.
+The cut follows the active Starlight theme: the `data-theme` attribute
+on `<html>`, which Starlight sets before first paint, including when it
+resolves **Auto** from the system color scheme. The
+[dark poster](public/scope-showreel-poster-dark.jpg) and
+[light poster](public/scope-showreel-poster-light.jpg), taken from the
+closing Scope title card, are exposed to CSS as base-aware custom
+properties. The frame paints the active theme's poster, and the video
+stays transparent over it until it has a frame. Neither the first paint
+nor a theme change shows the other cut, and the browser only fetches the
+poster it paints.
 
-Reduced-motion visitors see the [poster](public/scope-showreel-poster.jpg),
-taken from the closing Scope title card, without downloading the video
-until they choose to play it. Without JavaScript, the poster remains
-visible and the playback button stays hidden. Blocked autoplay offers
-manual playback; media failures display a status message and log the
-error. Both media URLs use the configured deployment base.
+[showreel.ts](src/scripts/showreel.ts) keeps both video URLs in data
+attributes and assigns the active theme's source only when playback
+starts, when at least a quarter of the player is visible. A
+keyboard-accessible button pauses or resumes it. Scrolling it below a
+quarter visible or hiding the tab pauses playback; an explicit user
+pause persists when returning. Selecting Play still starts a player that
+is less than a quarter visible, and it keeps playing until it leaves the
+viewport. The button overlays the bottom corner of the video, and moves
+below it on narrow screens so it does not cover the footage. The
+controls and frame use the landing tokens, so they stay readable over
+either cut.
+
+When the theme changes, a `MutationObserver` on `data-theme` swaps a
+loaded player to the matching cut at the same position, keeping it
+playing or paused. A paused player loads only the frame at that
+position. A player that is off screen, or less than a quarter visible
+and not started with Play, switches to the new poster at once and keeps
+its current source until it is visible again. A player that has not
+loaded yet only changes its poster.
+
+Reduced-motion visitors see the poster for their theme without
+downloading either video until they choose to play it. Without
+JavaScript, the poster remains visible and the playback button stays
+hidden. Blocked autoplay offers manual playback; media failures display
+a status message and log the error. All media URLs use the configured
+deployment base.
 
 ### Interactive example
 
@@ -267,10 +308,11 @@ Recommended content follow-ups:
 - Walk the first-run guide against a current deployment, then add
   maintained screenshots. Its claims about preseeded catalogs, model
   availability, and UI labels should not be assumed for every deployment.
-- Explain release-repository access during CLI onboarding. The legacy
-  `growth-ecosystems/scope-doc` reference is still used by the installer
-  and publishing workflow, so changing it just because the documentation
-  moved would be incorrect. A release migration is a separate change.
+- CLI releases now come from the public `microsoft/scope` repository.
+  Onboarding uses the canonical root installer; the website installer
+  is a compatibility entry point that downloads and runs that same
+  script. Public installation needs Node.js and curl, not GitHub
+  authentication. Deployment/API access requirements remain separate.
 - Add a real, reproducible sample-results walkthrough when an approved
   dataset is available. Keep real evidence separate from the example.
 

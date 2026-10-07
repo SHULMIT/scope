@@ -119,6 +119,47 @@ pnpm test:coverage                # Unit tests with a coverage report
 pnpm test:integration             # Integration tests (requires a .env file + Docker)
 ```
 
+[CI's](./.github/workflows/ci.yml) worker integration, queue recovery and Windows build jobs
+require `github.repository == 'microsoft/scope'`: they do not execute in fork
+repositories. A fork PR into upstream still runs the ACP workers' tool checks and
+the disposable MongoDB/Redis/Azurite queue tests. Worker credentials are withheld
+from fork-head code, so the existing live-auth tests skip when credentials are
+absent. Docker Hub login is optional and restricted to trusted code; public images
+can be pulled anonymously. LLM evals require trusted PR heads.
+The OSS CI workflow does not publish container images or request OIDC;
+its ACP test images are built and loaded locally. Public CI requires no Azure/ACR
+setup. PR test reporting and video
+uploads remain enabled, with missing video directories treated as no recordings.
+
+Changes to the CI workflow select the integration checks through a dedicated
+path filter. Run the focused workflow
+regressions with `pnpm exec vitest run scripts/ci-workflow.test.ts` and the real
+queue tests with `pnpm test:integration:queue` (Docker required).
+The ACP matrix covers the existing Copilot and Claude workers; the removed VS Code
+workers have no Dockerfiles or integration suites in this repository.
+Live-model credentials remain necessary for live-auth tests; passing public
+tool checks does not validate live-model access.
+
+Windows validation uses GitHub's `windows-2022` runner and its Windows Docker
+engine. `scripts/build-windows-worker.ps1` builds `Dockerfile.base` from public
+`servercore:ltsc2022`, builds pinned Copilot dependencies against that local image,
+then builds and smoke-tests the worker against the local dependencies image.
+No internal registry, prebuilt private image, secrets or image publication is
+required. Changes to the Windows worker, Linux Copilot dependency, shared packages,
+telemetry, workspace/build context, or CI select this check; failures block
+CI Summary. Run the same script locally on Windows Server 2022 with Docker.
+The PowerShell orchestration tests require `pwsh` (included on GitHub's Ubuntu
+runners); they mock Docker and do not replace the hosted Windows image build.
+
+The OSS repository does not depend on internal `scope-core` automation. The
+internal infrastructure status report and cloud image publishers are removed;
+Windows build validation is local, while CLI release publication is retained in
+this repository using its own `GITHUB_TOKEN`. Public Pages is unchanged. The
+manual CLI release workflow runs only on upstream `main`, builds and tests the
+exact bundle before publishing it to `microsoft/scope`, and needs no FLUX token.
+See [CLI distribution](./docs/architecture/cli-distribution.md) for versioning,
+installation and update behavior.
+
 ## Build, lint, and typecheck
 
 ```bash
@@ -161,8 +202,10 @@ MongoDB is CosmosDB-compatible — avoid MongoDB features that CosmosDB's MongoD
   (`.agents/skills/rust-best-practices/SKILL.md`).
 - **Databases**: keep MongoDB usage CosmosDB-compatible (see migrations above).
 - **Documentation is not optional**: if you add or change a component, API, data model, pattern, or
-  deployment behavior, update the relevant doc in [`docs/`](./docs/) (or add one and link it from the
-  README) as the last step before opening your PR.
+  deployment behavior, update the relevant technical doc in [`docs/`](./docs/) and user-facing
+  guide in [`website/src/content/docs/`](./website/src/content/docs/) as appropriate. Add new
+  website pages to the sidebar in [`website/astro.config.mjs`](./website/astro.config.mjs)
+  as the last step before opening your PR.
 
 ## Submitting a pull request
 
@@ -209,16 +252,15 @@ coordinate the review and follow it through to merge or closure. Confirm that th
 Scope's direction before asking the contributor for substantial revisions. Discuss larger
 features or architectural changes in an issue first.
 
-Reviewer routing is the team's responsibility, not the contributor's. Until automated routing is
-configured, the team designates a triage maintainer to check incoming PRs each business day, assign
-a maintainer as the PR owner, and request reviewers familiar with the affected area.
+Reviewer routing is the team's responsibility, not the contributor's. The repository's
+[`CODEOWNERS`](./.github/CODEOWNERS) file now routes review requests by area. The team should still
+designate a triage maintainer to check incoming PRs each business day, assign a maintainer as the PR
+owner, and request additional reviewers familiar with the affected area when needed.
 
-**Team follow-up:** add a `CODEOWNERS` file with a catch-all maintainers team and area owners for
-high-risk paths, including `.github/workflows/`, `packages/db-migrations/`, `packages/github-auth/`,
-`apps/token-manager/`, auth/RBAC and project-scoping code, and `packages/shared/`. Configure team
-review assignment to distribute requests, and branch protection to require code-owner review and
-dismiss stale approvals. These mechanisms are not configured by this policy change; until they
-are, the PR owner coordinates reviews and the merging maintainer checks the approval requirements.
+Keep the [`CODEOWNERS`](./.github/CODEOWNERS) file current as maintainers and area ownership evolve.
+Team review assignment and branch protection still need to be configured to distribute requests,
+require code-owner review, and dismiss stale approvals. Until those settings are enabled, the PR
+owner coordinates reviews and the merging maintainer checks the approval requirements.
 
 ### 2. Check readiness
 
@@ -295,8 +337,8 @@ Automations depend on these exact names:
 | --- | --- |
 | Worker version checker and upgrade workflow | `type: worker-update` |
 | Test Improver issues, PRs, and monthly-summary searches | `type: automation`, `topic: testing` |
-| Daily repository status reports | `agentic-workflows` |
 | Dependabot | `type: dependencies`, plus `language: javascript` or `language: rust` |
+| Pull Request Labeler | Area, topic, language, and type labels from `.github/labeler.yml` |
 
 Use `area: reporting` for Scope's benchmark reporting component, not daily repository activity.
 Worker upgrade routing uses `type: worker-update`, not the broader `area: worker`.
@@ -318,14 +360,13 @@ Repository configuration does not create or backfill this label automatically.
 ### Updating label-dependent configuration
 
 Update both the label filters and label writes in `.github/workflows/check-worker-versions.yml`,
-the agentic workflow `.md` frontmatter, and any label searches in their prompts.
+`.github/labeler.yml`, the agentic workflow `.md` frontmatter, and any label searches in their prompts.
 Regenerate the corresponding `.lock.yml` files with `gh aw compile`; do not edit generated YAML
 by hand. Use each file's recorded compiler version to avoid unrelated runtime upgrades:
 
 | Workflow | Compiler |
 | --- | --- |
 | `daily-test-improver` | `v0.57.1` |
-| `daily-repo-status` | `v0.60.0` |
 | `worker-version-upgrade` | `v0.63.0` |
 
 The daily schedules are explicit cron expressions preserving their existing UTC execution times.
@@ -337,6 +378,10 @@ website package, and the Rust gateway. Each entry has `open-pull-requests-limit:
 version-update PRs disabled; the required schedule does not enable those PRs. These labels also
 apply to security-update PRs when security updates are enabled in repository settings. This file
 does not enable security updates or change live labels.
+
+`.github/workflows/labeler.yml` runs on the unprivileged `pull_request` event and skips fork PRs.
+Do not switch it to `pull_request_target` just to label fork PRs; that would violate the fork-PR
+security boundary above.
 
 ## Third-party notices
 
@@ -381,6 +426,9 @@ installed dependencies.
 
 - Start with the [system architecture](./docs/architecture/system-architecture.md) and the
   [app design](./docs/architecture/app-design.md) docs for the big picture.
-- The [README](./README.md) introduces the platform, provides a local quick start, and links the full documentation index.
+- The [official documentation website](https://microsoft.github.io/scope/) includes
+  [local setup](https://microsoft.github.io/scope/getting-started/local-development/),
+  the [development guide](https://microsoft.github.io/scope/resources/development/), and
+  [contribution guidance](https://microsoft.github.io/scope/resources/contributing/).
 - Browse [open issues](https://github.com/microsoft/scope/issues) for bugs and
   proposed improvements. Discuss larger changes in an issue before starting work.
